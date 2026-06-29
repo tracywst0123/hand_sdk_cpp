@@ -1,22 +1,14 @@
 #pragma once
 
-#include "../src/api.hpp"
-#include "../src/connections/ethercat_connection.hpp"
-
-#include <memory>
-#include <string>
+#include "api.hpp"
+#include "config.hpp"
 
 namespace hand_sdk
 {
 
-class HandSdk
+inline Api createEthercat(Config config)
 {
-public:
-    static Api createEthercat(const std::string& interface_name)
-    {
-        return Api(std::make_unique<connections::EthercatConnection>(interface_name));
-    }
-
-};
+    return Api(std::move(config));
+}
 
 } // namespace hand_sdk

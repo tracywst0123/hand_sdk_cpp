@@ -1,24 +1,34 @@
-#include "api.hpp"
+#include "../include/api.hpp"
 
 #include <exception>
 
 namespace hand_sdk
 {
 
-Api::Api(std::unique_ptr<connections::BaseConnection> connection) : connection_(std::move(connection)) {}
+Api::Api(Config config) : connection_(std::move(config)) {}
 
-Result<void> Api::connect()
+Result<HandsStatus> Api::connect()
 {
     try {
-        if (!connection_) {
-            return {false, "No connection"};
+        auto err = connection_.connect();
+        if (!err.empty()) {
+            return {false, err};
         }
 
-        if (!connection_->connect()) {
-            return {false, "Failed to connect"};
+        return {true, "Connected", {connection_.hasLeft(), connection_.hasRight()}};
+    } catch (const std::exception& e) {
+        return {false, e.what()};
+    }
+}
+
+Result<void> Api::update()
+{
+    try {
+        if (!connection_.update()) {
+            return {false, "PDO exchange failed"};
         }
 
-        return {true, "Connected"};
+        return {true, "OK"};
     } catch (const std::exception& e) {
         return {false, e.what()};
     }
@@ -27,60 +37,43 @@ Result<void> Api::connect()
 Result<void> Api::disconnect()
 {
     try {
-        if (!connection_) {
-            return {false, "No connection"};
-        }
-
-        connection_->disconnect();
+        connection_.disconnect();
         return {true, "Disconnected"};
     } catch (const std::exception& e) {
         return {false, e.what()};
     }
 }
 
-Result<frames::ReadState> Api::readState()
+Result<frames::DualHandState> Api::readState()
 {
     try {
-        if (!connection_ || !connection_->isConnected()) {
-            return {false, "Not connected", {}};
+        frames::DualHandState state{};
+        if (!connection_.readState(state)) {
+            return {false, "Failed to read state"};
         }
 
-        frames::ReadState state{};
-        if (!connection_->readState(state)) {
-            return {false, "Failed to read state", {}};
-        }
-
-        return {true, "Read state OK", state};
-    } catch (const std::exception& e) {
-        return {false, e.what(), {}};
-    }
-}
-
-Result<void> Api::sendCommand(const frames::QCommand& command)
-{
-    try {
-        if (!connection_ || !connection_->isConnected()) {
-            return {false, "Not connected"};
-        }
-
-        if (!connection_->sendCommand(command)) {
-            return {false, "Failed to send command"};
-        }
-
-        return {true, "Command sent"};
+        return {true, "OK", state};
     } catch (const std::exception& e) {
         return {false, e.what()};
     }
 }
 
-bool Api::isConnected() const
+Result<void> Api::sendCommand(const frames::DualHandCommand& command)
 {
-    return connection_ && connection_->isConnected();
+    try {
+        if (!connection_.sendCommand(command)) {
+            return {false, "Failed to send command"};
+        }
+
+        return {true, "OK"};
+    } catch (const std::exception& e) {
+        return {false, e.what()};
+    }
 }
 
-std::string Api::connectionName() const
+HandsStatus Api::isConnected() const
 {
-    return connection_ ? connection_->name() : "none";
+    return {connection_.hasLeft(), connection_.hasRight()};
 }
 
 } // namespace hand_sdk

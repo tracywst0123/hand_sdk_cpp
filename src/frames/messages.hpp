@@ -1,48 +1,40 @@
 #pragma once
 
 #include <array>
-#include <cstdint>
-#include <map>
 
 namespace hand_sdk::frames
 {
 
-constexpr std::size_t kNumJoints = 16;
+constexpr std::size_t kNumJoints = 21;
 
-enum class ControlMode : uint8_t
+struct HandState
 {
-    Disabled = 0,
-    Position = 1,
-    Velocity = 2,
-    Torque = 3,
-    Impedance = 4,
+    std::array<float, kNumJoints> q{};    // positions
+    std::array<float, kNumJoints> dq{};   // velocities
+    std::array<float, kNumJoints> tau{};  // torques
 };
 
-struct ReadState
+struct HandCommand
 {
     std::array<float, kNumJoints> q{};
-    std::array<float, kNumJoints> qd{};
+    std::array<float, kNumJoints> dq{};
     std::array<float, kNumJoints> tau{};
 };
 
-struct QCommand
+struct DualHandState
 {
-    ControlMode mode{ControlMode::Disabled};
-    std::array<float, kNumJoints> q{};
-    std::array<float, kNumJoints> qd{};
-    std::array<float, kNumJoints> tau{};
+    bool has_left{false};
+    HandState left{};
+    bool has_right{false};
+    HandState right{};
 };
 
-struct ParameterState
+struct DualHandCommand
 {
-    std::array<float, kNumJoints> kp{};
-    std::array<float, kNumJoints> kd{};
-    float temperature{0.0F};
-};
-
-struct SensorMap
-{
-    std::map<std::string, uint16_t> sensors{};
+    bool has_left{false};
+    HandCommand left{};
+    bool has_right{false};
+    HandCommand right{};
 };
 
 } // namespace hand_sdk::frames

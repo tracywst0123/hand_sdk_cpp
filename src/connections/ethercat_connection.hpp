@@ -1,10 +1,10 @@
 #pragma once
 
+#include "../../include/config.hpp"
 #include "../frames/messages.hpp"
 
 #include <cstdint>
 #include <string>
-#include <vector>
 
 extern "C" {
 #include <soem/soem.h>
@@ -16,33 +16,44 @@ namespace hand_sdk::connections
 class EthercatConnection
 {
 public:
-    explicit EthercatConnection(std::string interface_name, int slave_id = 1);
+    explicit EthercatConnection(Config config);
     ~EthercatConnection();
 
-    bool connect();
+    // Returns empty string on success, error description on failure.
+    std::string connect();
     void disconnect();
-    bool isConnected() const;
 
-    bool sendCommand(const frames::QCommand& command);
-    bool readState(frames::ReadState& state);
+    bool hasLeft() const;
+    bool hasRight() const;
 
-    bool readSDO(uint16_t index, uint8_t subindex, std::vector<uint8_t>& data, int size);
-    bool writeSDO(uint16_t index, uint8_t subindex, const std::vector<uint8_t>& data);
+    // Exchange PDO buffers over the network. Call at a fixed rate (e.g. 200 Hz).
+    // sendCommand() writes to the output buffer; readState() reads from the input buffer.
+    // Neither transmits on the wire — only update() does.
+    bool update();
 
-    bool updatePDO();
+    bool readState(frames::DualHandState& state);
+    bool sendCommand(const frames::DualHandCommand& command);
+
+    std::string name() const;
 
 private:
-    std::string interface_name_;
-    int slave_id_{1};
+    bool exchangePDO();
+
+    Config config_;
     bool connected_{false};
 
-    uint8_t* input_pdo_{nullptr};   // TxPDO: slave -> master
-    uint8_t* output_pdo_{nullptr};  // RxPDO: master -> slave
+    int left_slave_id_{-1};
+    int right_slave_id_{-1};
 
-    ecx_contextt context_{};
+    uint8_t* left_tx_{nullptr};    // ReadPDO: slave → master (state)
+    uint8_t* left_rx_{nullptr};    // WritePDO: master → slave (commands)
+    uint8_t* right_tx_{nullptr};
+    uint8_t* right_rx_{nullptr};
 
     static constexpr int kIomapSize = 4096;
     uint8_t iomap_[kIomapSize]{};
+
+    ecx_contextt context_{};
 };
 
 } // namespace hand_sdk::connections

@@ -1,27 +1,55 @@
-#include "../src/hand_sdk.hpp"
+#include "../include/hand_sdk.hpp"
 
 #include <iostream>
+#include <thread>
 
 int main()
 {
-    auto hand = hand_sdk::HandSdk::createEthercat("eth0");
+    hand_sdk::Config config;
+    config.interface_name  = "enp132s0";
+    config.left_hand_name  = "hand_200_L";
+    config.right_hand_name = "hand_200_R";
+
+    auto hand = hand_sdk::createEthercat(config);
 
     auto connect_result = hand.connect();
     if (!connect_result.success) {
-        std::cerr << connect_result.msg << "\n";
+        std::cerr << "Connect failed: " << connect_result.msg << "\n";
         return 1;
     }
 
-    hand_sdk::frames::QCommand command{};
-    command.mode = hand_sdk::frames::ControlMode::Position;
-    command.q[0] = 0.5F;
+    std::cout << "Left hand:  " << (connect_result.value.has_left  ? "found" : "not found") << "\n";
+    std::cout << "Right hand: " << (connect_result.value.has_right ? "found" : "not found") << "\n";
 
-    auto send_result = hand.sendCommand(command);
-    std::cout << send_result.msg << "\n";
+    // Send a position command to the left hand
+    hand_sdk::frames::DualHandCommand command{};
+    command.has_right   = true;
+    command.right.dq[0]  = 20;  // joint 1 position in raw int16 units
 
+    command.has_left   = true;
+    command.left.dq[0]  = 20;  // joint 1 position in raw int16 units
+    hand.sendCommand(command);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    auto update_result = hand.update();
+    std::cout << "update: " << update_result.success << "\n";
+    std::cout << "update: " << update_result.msg << "\n";
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    update_result = hand.update();
+    std::cout << "update: " << update_result.success << "\n";
+    std::cout << "update: " << update_result.msg << "\n";
+
+    // Read state from both hands (triggers a PDO exchange)
     auto state_result = hand.readState();
     if (state_result.success) {
-        std::cout << "q[0] = " << state_result.value.q[0] << "\n";
+        if (state_result.value.has_right) {
+            for (int i = 0; i < 21; ++i) {
+                std::cout << "Right q[" << i << "]=" << state_result.value.right.q[i]
+                          << " dq[" << i << "]=" << state_result.value.right.dq[i]
+                          << " tau[" << i << "]=" << state_result.value.right.tau[i] << "\n";
+            }
+        }
     }
 
     hand.disconnect();

@@ -3,37 +3,33 @@
 #include "messages.hpp"
 #include "pdo_layout.hpp"
 
-#include <algorithm>
-
 namespace hand_sdk::frames::pdo
 {
 
-inline ReadState decodeTxPDO(const TxPDO& pdo)
+inline HandState decodeReadPDO(const ReadPDO& pdo)
 {
-    ReadState state{};
+    HandState state{};
 
     for (std::size_t i = 0; i < kNumJoints; ++i) {
-        state.q[i] = static_cast<float>(pdo.joint_angle[i]);
-        state.qd[i] = static_cast<float>(pdo.motor_velocity[i]);
-        state.tau[i] = static_cast<float>(pdo.motor_current[i]);
+        state.q[i]   = static_cast<float>(pdo.joints[i].angle);
+        state.dq[i]  = static_cast<float>(pdo.joints[i].speed);
+        state.tau[i] = static_cast<float>(pdo.joints[i].torque);
     }
 
     return state;
 }
 
-inline RxPDO encodeRxPDO(const QCommand& command)
+inline WritePDO encodeWritePDO(const HandCommand& command)
 {
-    RxPDO pdo{};
-
-    pdo.mode = static_cast<uint8_t>(command.mode);
+    WritePDO pdo{};
 
     for (std::size_t i = 0; i < kNumJoints; ++i) {
-        pdo.target_position[i] = static_cast<int16_t>(command.q[i]);
-        pdo.target_velocity[i] = static_cast<int16_t>(command.qd[i]);
-        pdo.target_torque[i] = static_cast<int16_t>(command.tau[i]);
+        pdo.joints[i].angle  = static_cast<int16_t>(command.q[i]);
+        pdo.joints[i].speed  = static_cast<int16_t>(command.dq[i]);
+        pdo.joints[i].torque = static_cast<int16_t>(command.tau[i]);
     }
 
     return pdo;
 }
 
-} // namespace hand_sdk::frames::v1
+} // namespace hand_sdk::frames::pdo

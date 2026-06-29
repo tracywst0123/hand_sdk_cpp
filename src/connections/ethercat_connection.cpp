@@ -8,13 +8,16 @@ extern "C" {
 }
 
 #include <cstring>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
 #include <utility>
 
 namespace hand_sdk::connections
 {
 
-EthercatConnection::EthercatConnection(std::string interface_name, int slave_id)
-    : interface_name_(std::move(interface_name)), slave_id_(slave_id)
+EthercatConnection::EthercatConnection(Config config)
+    : config_(std::move(config))
 {
 }
 
@@ -23,48 +26,155 @@ EthercatConnection::~EthercatConnection()
     disconnect();
 }
 
-bool EthercatConnection::connect()
+std::string EthercatConnection::connect()
 {
-    if (!ecx_init(&context_, interface_name_.c_str())) {
-        return false;
+    if (connected_) {
+        return {};
     }
 
+    std::clog << "[EtherCAT] ecx_init on '" << config_.interface_name << "'..." << std::endl;
+    if (!ecx_init(&context_, config_.interface_name.c_str())) {
+        return "ecx_init failed: could not open interface '" + config_.interface_name + "'";
+    }
+
+    std::clog << "[EtherCAT] ecx_config_init (scanning bus)..." << std::endl;
     if (ecx_config_init(&context_) <= 0) {
         ecx_close(&context_);
-        return false;
+        return "ecx_config_init failed: no EtherCAT slaves found on '" + config_.interface_name + "'";
+    }
+    std::clog << "[EtherCAT] found " << context_.slavecount << " slave(s):" << std::endl;
+    for (int i = 1; i <= context_.slavecount; ++i) {
+        std::clog << "  [" << i << "] '" << context_.slavelist[i].name << "'" << std::endl;
     }
 
     ecx_config_map_group(&context_, iomap_, 0);
     ecx_configdc(&context_);
 
+    // Diagnostic: print actual mapped PDO sizes per slave
+    std::clog << "[EtherCAT] PDO map sizes after ecx_config_map_group:" << std::endl;
+    for (int i = 1; i <= context_.slavecount; ++i) {
+        const auto& s = context_.slavelist[i];
+        std::clog << "  [" << i << "] '" << s.name
+                  << "' Obytes=" << s.Obytes << " Ibytes=" << s.Ibytes << std::endl;
+    }
+
+    // Identify left and right hand slaves by name
+    left_slave_id_  = -1;
+    right_slave_id_ = -1;
+
+    for (int i = 1; i <= context_.slavecount; ++i) {
+        if (std::strcmp(context_.slavelist[i].name, config_.left_hand_name.c_str()) == 0) {
+            left_slave_id_ = i;
+        } else if (std::strcmp(context_.slavelist[i].name, config_.right_hand_name.c_str()) == 0) {
+            right_slave_id_ = i;
+        }
+    }
+
+    if (left_slave_id_ == -1 && right_slave_id_ == -1) {
+        std::string found;
+        for (int i = 1; i <= context_.slavecount; ++i) {
+            found += std::string(" '") + context_.slavelist[i].name + "'";
+        }
+        ecx_close(&context_);
+        return "no matching hand slaves found (looking for '" + config_.left_hand_name +
+               "' / '" + config_.right_hand_name + "'); slaves on bus:" +
+               (found.empty() ? " none" : found);
+    }
+
+    // Validate that the device's actual PDO sizes match our struct layout.
+    // SOEM reports the slave's runtime SyncManager sizes (ground truth), from
+    // the master's perspective: outputs/Obytes = what we write (commands),
+    // inputs/Ibytes = what we read (state).
+    for (int i = 1; i <= context_.slavecount; ++i) {
+        if (i != left_slave_id_ && i != right_slave_id_) {
+            continue;
+        }
+        const auto& s = context_.slavelist[i];
+        if (s.Obytes != sizeof(frames::pdo::WritePDO) ||
+            s.Ibytes != sizeof(frames::pdo::ReadPDO)) {
+            std::ostringstream oss;
+            oss << "PDO size mismatch on slave [" << i << "] '" << s.name
+                << "': device Obytes=" << s.Obytes << " Ibytes=" << s.Ibytes
+                << ", expected WritePDO=" << sizeof(frames::pdo::WritePDO)
+                << " ReadPDO=" << sizeof(frames::pdo::ReadPDO);
+            ecx_close(&context_);
+            return oss.str();
+        }
+    }
+
+    std::clog << "[EtherCAT] transitioning to SAFE_OP..." << std::endl;
     context_.slavelist[0].state = EC_STATE_SAFE_OP;
     ecx_writestate(&context_, 0);
     ecx_statecheck(&context_, 0, EC_STATE_SAFE_OP, EC_TIMEOUTSTATE);
-
-    input_pdo_ = context_.slavelist[slave_id_].inputs;
-    output_pdo_ = context_.slavelist[slave_id_].outputs;
-
-    if (input_pdo_ == nullptr || output_pdo_ == nullptr) {
-        ecx_close(&context_);
-        return false;
-    }
+    std::clog << "[EtherCAT] SAFE_OP reached, transitioning to OPERATIONAL..." << std::endl;
 
     context_.slavelist[0].state = EC_STATE_OPERATIONAL;
     ecx_writestate(&context_, 0);
 
-    for (int i = 0; i < 100; ++i) {
+    bool op_ready = false;
+    for (int attempt = 0; attempt < 200; ++attempt) {
         ecx_send_processdata(&context_);
         ecx_receive_processdata(&context_, EC_TIMEOUTRET);
-        ecx_statecheck(&context_, 0, EC_STATE_OPERATIONAL, EC_TIMEOUTSTATE);
+        ecx_readstate(&context_);
 
-        if (context_.slavelist[0].state == EC_STATE_OPERATIONAL) {
-            connected_ = true;
-            return true;
+        // Keep nudging slaves towards OP. Some devices park in SAFE_OP until
+        // they receive process data cycles and explicit OP requests.
+        for (int i = 1; i <= context_.slavecount; ++i) {
+            if (context_.slavelist[i].state == (EC_STATE_SAFE_OP + EC_STATE_ERROR)) {
+                context_.slavelist[i].state = EC_STATE_SAFE_OP + EC_STATE_ACK;
+                ecx_writestate(&context_, i);
+            } else if (context_.slavelist[i].state == EC_STATE_SAFE_OP) {
+                context_.slavelist[i].state = EC_STATE_OPERATIONAL;
+                ecx_writestate(&context_, i);
+            }
+        }
+
+        ecx_statecheck(&context_, 0, EC_STATE_OPERATIONAL, 50000); // 50 ms per attempt
+
+        const bool left_ok = (left_slave_id_ == -1) ||
+            (context_.slavelist[left_slave_id_].state == EC_STATE_OPERATIONAL);
+        const bool right_ok = (right_slave_id_ == -1) ||
+            (context_.slavelist[right_slave_id_].state == EC_STATE_OPERATIONAL);
+
+        if (left_ok && right_ok) {
+            op_ready = true;
+            break;
         }
     }
+    std::clog << "[EtherCAT] OPERATIONAL mode on" << std::endl;
 
-    ecx_close(&context_);
-    return false;
+    if (!op_ready) {
+        std::ostringstream oss;
+        oss << "slaves found but failed to reach OPERATIONAL state";
+        for (int i = 1; i <= context_.slavecount; ++i) {
+            const auto& slave = context_.slavelist[i];
+            oss << "\n  [" << i << "] '" << slave.name
+                << "' state=0x" << std::hex << std::setw(2) << std::setfill('0')
+                << static_cast<int>(slave.state)
+                << " al=0x" << std::setw(4) << static_cast<int>(slave.ALstatuscode)
+                << std::dec << " (" << ec_ALstatuscode2string(slave.ALstatuscode) << ")";
+        }
+        ecx_close(&context_);
+        return oss.str();
+    }
+
+    // Cache PDO pointers for each hand
+    // SOEM: slave.inputs  = data arriving FROM slave (slave TxPDO) = master ReadPDO (state)
+    // SOEM: slave.outputs = data going TO slave      (slave RxPDO) = master WritePDO (commands)
+    if (left_slave_id_ != -1) {
+        left_tx_ = context_.slavelist[left_slave_id_].inputs;
+        left_rx_ = context_.slavelist[left_slave_id_].outputs;
+        std::clog << "[EtherCAT] Left hand: inputs=" << (void*)left_tx_ << " outputs=" << (void*)left_rx_ << std::endl;
+    }
+
+    if (right_slave_id_ != -1) {
+        right_tx_ = context_.slavelist[right_slave_id_].inputs;
+        right_rx_ = context_.slavelist[right_slave_id_].outputs;
+        std::clog << "[EtherCAT] Right hand: inputs=" << (void*)right_tx_ << " outputs=" << (void*)right_rx_ << std::endl;
+    }
+
+    connected_ = true;
+    return {};
 }
 
 void EthercatConnection::disconnect()
@@ -77,17 +187,27 @@ void EthercatConnection::disconnect()
     ecx_writestate(&context_, 0);
     ecx_close(&context_);
 
-    input_pdo_ = nullptr;
-    output_pdo_ = nullptr;
+    left_tx_  = nullptr;
+    left_rx_  = nullptr;
+    right_tx_ = nullptr;
+    right_rx_ = nullptr;
+    left_slave_id_  = -1;
+    right_slave_id_ = -1;
     connected_ = false;
 }
 
-bool EthercatConnection::isConnected() const
+bool EthercatConnection::hasLeft() const
 {
-    return connected_;
+    return connected_ && left_slave_id_ != -1;
 }
 
-bool EthercatConnection::updatePDO()
+bool EthercatConnection::hasRight() const
+{
+    return connected_ && right_slave_id_ != -1;
+}
+
+
+bool EthercatConnection::exchangePDO()
 {
     if (!connected_) {
         return false;
@@ -95,83 +215,61 @@ bool EthercatConnection::updatePDO()
 
     ecx_send_processdata(&context_);
     int wkc = ecx_receive_processdata(&context_, EC_TIMEOUTRET);
-
     return wkc > 0;
 }
 
-bool EthercatConnection::sendCommand(const frames::QCommand& command)
+bool EthercatConnection::update()
 {
-    if (!connected_ || output_pdo_ == nullptr) {
-        return false;
-    }
-
-    auto pdo = frames::pdo::encodeRxPDO(command);
-    std::memcpy(output_pdo_, &pdo, sizeof(frames::pdo::RxPDO));
-
-    return true;
+    return exchangePDO();
 }
 
-bool EthercatConnection::readState(frames::ReadState& state)
-{
-    if (!connected_ || input_pdo_ == nullptr) {
-        return false;
-    }
-
-    frames::pdo::TxPDO pdo{};
-    std::memcpy(&pdo, input_pdo_, sizeof(frames::pdo::TxPDO));
-
-    state = frames::pdo::decodeTxPDO(pdo);
-
-    return true;
-}
-
-bool EthercatConnection::readSDO(uint16_t index, uint8_t subindex, std::vector<uint8_t>& data, int size)
+bool EthercatConnection::readState(frames::DualHandState& state)
 {
     if (!connected_) {
         return false;
     }
 
-    data.resize(size);
-    int read_size = size;
+    state = {};
 
-    int wkc = ecx_SDOread(
-        &context_,
-        slave_id_,
-        index,
-        subindex,
-        FALSE,
-        &read_size,
-        data.data(),
-        EC_TIMEOUTRXM
-    );
-
-    if (wkc <= 0) {
-        data.clear();
-        return false;
+    if (left_slave_id_ != -1 && left_tx_ != nullptr) {
+        frames::pdo::ReadPDO pdo{};
+        std::memcpy(&pdo, left_tx_, sizeof(frames::pdo::ReadPDO));
+        state.left     = frames::pdo::decodeReadPDO(pdo);
+        state.has_left = true;
     }
 
-    data.resize(read_size);
+    if (right_slave_id_ != -1 && right_tx_ != nullptr) {
+        frames::pdo::ReadPDO pdo{};
+        std::memcpy(&pdo, right_tx_, sizeof(frames::pdo::ReadPDO));
+        state.right     = frames::pdo::decodeReadPDO(pdo);
+        state.has_right = true;
+    }
+
     return true;
 }
 
-bool EthercatConnection::writeSDO(uint16_t index, uint8_t subindex, const std::vector<uint8_t>& data)
+bool EthercatConnection::sendCommand(const frames::DualHandCommand& command)
 {
     if (!connected_) {
         return false;
     }
 
-    int wkc = ecx_SDOwrite(
-        &context_,
-        slave_id_,
-        index,
-        subindex,
-        FALSE,
-        static_cast<int>(data.size()),
-        const_cast<uint8_t*>(data.data()),
-        EC_TIMEOUTRXM
-    );
+    if (command.has_left && left_slave_id_ != -1 && left_rx_ != nullptr) {
+        auto pdo = frames::pdo::encodeWritePDO(command.left);
+        std::memcpy(left_rx_, &pdo, sizeof(frames::pdo::WritePDO));
+    }
 
-    return wkc > 0;
+    if (command.has_right && right_slave_id_ != -1 && right_rx_ != nullptr) {
+        auto pdo = frames::pdo::encodeWritePDO(command.right);
+        std::memcpy(right_rx_, &pdo, sizeof(frames::pdo::WritePDO));
+    }
+
+    return true;
+}
+
+std::string EthercatConnection::name() const
+{
+    return "EtherCAT:" + config_.interface_name;
 }
 
 } // namespace hand_sdk::connections
