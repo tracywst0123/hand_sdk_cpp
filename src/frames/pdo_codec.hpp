@@ -3,6 +3,8 @@
 #include "messages.hpp"
 #include "pdo_layout.hpp"
 
+#include <iostream>
+
 namespace hand_sdk::frames::pdo
 {
 

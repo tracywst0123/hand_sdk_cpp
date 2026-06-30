@@ -1,10 +1,30 @@
 #include "../include/hand_sdk.hpp"
 
+#include <atomic>
+#include <chrono>
+#include <csignal>
 #include <iostream>
 #include <thread>
 
+namespace {
+std::atomic<bool> g_run{true};
+void onSignal(int) { g_run = false; }
+
+// Print the first 6 PDO "words" of a hand state: joints[0] and joints[1],
+// each as (q=angle, dq=speed, tau=torque). These are the first 6 int16 values.
+void printFirst6(const char* tag, const hand_sdk::frames::HandState& s)
+{
+    std::cout << " | " << tag << ":"
+              << " [0] q=" << s.q[0] << " dq=" << s.dq[0] << " tau=" << s.tau[0]
+              << " [1] q=" << s.q[1] << " dq=" << s.dq[1] << " tau=" << s.tau[1];
+}
+} // namespace
+
 int main()
 {
+    std::signal(SIGINT, onSignal);
+    std::signal(SIGTERM, onSignal);
+
     hand_sdk::Config config;
     config.interface_name  = "enp132s0";
     config.left_hand_name  = "hand_200_L";
@@ -21,37 +41,53 @@ int main()
     std::cout << "Left hand:  " << (connect_result.value.has_left  ? "found" : "not found") << "\n";
     std::cout << "Right hand: " << (connect_result.value.has_right ? "found" : "not found") << "\n";
 
-    // Send a position command to the left hand
+
     hand_sdk::frames::DualHandCommand command{};
-    command.has_right   = true;
-    command.right.dq[0]  = 20;  // joint 1 position in raw int16 units
+    command.has_left  = true;
+    command.left.q[0]   = 20;  // 1st word
+    command.left.dq[0]  = 20;  // 2nd word
+    command.left.tau[0] = 20;  // 3rd word
+    command.has_right = true;
+    command.right.q[0]   = 20;
+    command.right.dq[0]  = 20;
+    command.right.tau[0] = 20;
 
-    command.has_left   = true;
-    command.left.dq[0]  = 20;  // joint 1 position in raw int16 units
-    hand.sendCommand(command);
+    std::cout << "Running echo test (Ctrl-C to stop)...\n";
+    std::cout << "Write increments to left, 20 to right (q[0], dq[0], tau[0]).\n";
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    auto update_result = hand.update();
-    std::cout << "update: " << update_result.success << "\n";
-    std::cout << "update: " << update_result.msg << "\n";
+    constexpr int kPrintEveryN = 100;  // ~10 Hz at a 1 ms cycle
+    int cycle = 0;
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    update_result = hand.update();
-    std::cout << "update: " << update_result.success << "\n";
-    std::cout << "update: " << update_result.msg << "\n";
+    while (g_run) {
 
-    // Read state from both hands (triggers a PDO exchange)
-    auto state_result = hand.readState();
-    if (state_result.success) {
-        if (state_result.value.has_right) {
-            for (int i = 0; i < 21; ++i) {
-                std::cout << "Right q[" << i << "]=" << state_result.value.right.q[i]
-                          << " dq[" << i << "]=" << state_result.value.right.dq[i]
-                          << " tau[" << i << "]=" << state_result.value.right.tau[i] << "\n";
+        hand.sendCommand(command);
+
+        command.left.q[0] += 1;   // increment the command for the next cycle`
+        command.left.dq[0] += 1;
+        command.left.tau[0] += 1;
+        auto update_result = hand.update();
+        auto state_result  = hand.readState();
+
+        if (cycle % kPrintEveryN == 0) {
+            std::cout << "[" << cycle << "] update=" << update_result.success;
+            if (state_result.success) {
+                if (state_result.value.has_left) {
+                    printFirst6("L", state_result.value.left);
+                }
+                if (state_result.value.has_right) {
+                    printFirst6("R", state_result.value.right);
+                }
+            } else {
+                std::cout << " (readState failed: " << state_result.msg << ")";
             }
+            std::cout << std::endl;
         }
+
+        ++cycle;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
+    std::cout << "\nStopping...\n";
     hand.disconnect();
     return 0;
 }

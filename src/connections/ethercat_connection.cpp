@@ -50,14 +50,6 @@ std::string EthercatConnection::connect()
     ecx_config_map_group(&context_, iomap_, 0);
     ecx_configdc(&context_);
 
-    // Diagnostic: print actual mapped PDO sizes per slave
-    std::clog << "[EtherCAT] PDO map sizes after ecx_config_map_group:" << std::endl;
-    for (int i = 1; i <= context_.slavecount; ++i) {
-        const auto& s = context_.slavelist[i];
-        std::clog << "  [" << i << "] '" << s.name
-                  << "' Obytes=" << s.Obytes << " Ibytes=" << s.Ibytes << std::endl;
-    }
-
     // Identify left and right hand slaves by name
     left_slave_id_  = -1;
     right_slave_id_ = -1;
@@ -81,27 +73,6 @@ std::string EthercatConnection::connect()
                (found.empty() ? " none" : found);
     }
 
-    // Validate that the device's actual PDO sizes match our struct layout.
-    // SOEM reports the slave's runtime SyncManager sizes (ground truth), from
-    // the master's perspective: outputs/Obytes = what we write (commands),
-    // inputs/Ibytes = what we read (state).
-    for (int i = 1; i <= context_.slavecount; ++i) {
-        if (i != left_slave_id_ && i != right_slave_id_) {
-            continue;
-        }
-        const auto& s = context_.slavelist[i];
-        if (s.Obytes != sizeof(frames::pdo::WritePDO) ||
-            s.Ibytes != sizeof(frames::pdo::ReadPDO)) {
-            std::ostringstream oss;
-            oss << "PDO size mismatch on slave [" << i << "] '" << s.name
-                << "': device Obytes=" << s.Obytes << " Ibytes=" << s.Ibytes
-                << ", expected WritePDO=" << sizeof(frames::pdo::WritePDO)
-                << " ReadPDO=" << sizeof(frames::pdo::ReadPDO);
-            ecx_close(&context_);
-            return oss.str();
-        }
-    }
-
     std::clog << "[EtherCAT] transitioning to SAFE_OP..." << std::endl;
     context_.slavelist[0].state = EC_STATE_SAFE_OP;
     ecx_writestate(&context_, 0);
@@ -111,10 +82,28 @@ std::string EthercatConnection::connect()
     context_.slavelist[0].state = EC_STATE_OPERATIONAL;
     ecx_writestate(&context_, 0);
 
+    // exchangeRaw() moves readState()/sendCommand() with direct FPWR/FPRD to the (physically correct)
+    // SyncManager regions SM2@0x1100 (command) / SM3@0x1400 (state).
+    if (left_slave_id_ != -1) {
+        left_addr_ = context_.slavelist[left_slave_id_].configadr;
+        left_rx_   = left_out_;   // command  (master → slave, SM2)
+        left_tx_   = left_in_;    // state    (slave → master, SM3)
+        std::clog << "[EtherCAT] Left hand: configadr=0x" << std::hex << left_addr_ << std::dec
+                  << " (direct SM access SM2@0x1100/SM3@0x1400)" << std::endl;
+    }
+    if (right_slave_id_ != -1) {
+        right_addr_ = context_.slavelist[right_slave_id_].configadr;
+        right_rx_   = right_out_;
+        right_tx_   = right_in_;
+        std::clog << "[EtherCAT] Right hand: configadr=0x" << std::hex << right_addr_ << std::dec
+                  << " (direct SM access SM2@0x1100/SM3@0x1400)" << std::endl;
+    }
+
     bool op_ready = false;
     for (int attempt = 0; attempt < 200; ++attempt) {
-        ecx_send_processdata(&context_);
-        ecx_receive_processdata(&context_, EC_TIMEOUTRET);
+        // Direct SM exchange instead of ecx_send/receive_processdata (LRW),
+        // since the FMMUs are programmed reversed (see exchangeRaw()).
+        exchangeRaw();
         ecx_readstate(&context_);
 
         // Keep nudging slaves towards OP. Some devices park in SAFE_OP until
@@ -158,21 +147,6 @@ std::string EthercatConnection::connect()
         return oss.str();
     }
 
-    // Cache PDO pointers for each hand
-    // SOEM: slave.inputs  = data arriving FROM slave (slave TxPDO) = master ReadPDO (state)
-    // SOEM: slave.outputs = data going TO slave      (slave RxPDO) = master WritePDO (commands)
-    if (left_slave_id_ != -1) {
-        left_tx_ = context_.slavelist[left_slave_id_].inputs;
-        left_rx_ = context_.slavelist[left_slave_id_].outputs;
-        std::clog << "[EtherCAT] Left hand: inputs=" << (void*)left_tx_ << " outputs=" << (void*)left_rx_ << std::endl;
-    }
-
-    if (right_slave_id_ != -1) {
-        right_tx_ = context_.slavelist[right_slave_id_].inputs;
-        right_rx_ = context_.slavelist[right_slave_id_].outputs;
-        std::clog << "[EtherCAT] Right hand: inputs=" << (void*)right_tx_ << " outputs=" << (void*)right_rx_ << std::endl;
-    }
-
     connected_ = true;
     return {};
 }
@@ -191,6 +165,8 @@ void EthercatConnection::disconnect()
     left_rx_  = nullptr;
     right_tx_ = nullptr;
     right_rx_ = nullptr;
+    left_addr_  = 0;
+    right_addr_ = 0;
     left_slave_id_  = -1;
     right_slave_id_ = -1;
     connected_ = false;
@@ -207,20 +183,34 @@ bool EthercatConnection::hasRight() const
 }
 
 
-bool EthercatConnection::exchangePDO()
+bool EthercatConnection::update()
 {
     if (!connected_) {
         return false;
     }
 
-    ecx_send_processdata(&context_);
-    int wkc = ecx_receive_processdata(&context_, EC_TIMEOUTRET);
-    return wkc > 0;
+    int wkc = exchangeRaw();
+    int expected = 0;
+    if (left_slave_id_  != -1) expected += 2;
+    if (right_slave_id_ != -1) expected += 2;
+    return expected > 0 && wkc >= expected;
 }
 
-bool EthercatConnection::update()
+
+int EthercatConnection::exchangeRaw()
 {
-    return exchangePDO();
+    int wkc = 0;
+
+    if (left_slave_id_ != -1) {
+        wkc += ecx_FPWR(&context_.port, left_addr_, kSmOutAddr, kOutBytes, left_out_, EC_TIMEOUTRET);
+        wkc += ecx_FPRD(&context_.port, left_addr_, kSmInAddr,  kInBytes,  left_in_,  EC_TIMEOUTRET);
+    }
+    if (right_slave_id_ != -1) {
+        wkc += ecx_FPWR(&context_.port, right_addr_, kSmOutAddr, kOutBytes, right_out_, EC_TIMEOUTRET);
+        wkc += ecx_FPRD(&context_.port, right_addr_, kSmInAddr,  kInBytes,  right_in_,  EC_TIMEOUTRET);
+    }
+
+    return wkc;
 }
 
 bool EthercatConnection::readState(frames::DualHandState& state)
