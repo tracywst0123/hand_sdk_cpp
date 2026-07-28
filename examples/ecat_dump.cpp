@@ -1,8 +1,10 @@
 // EtherCAT slave structure dump — diagnose SII/EEPROM vs intended PDO sizes.
 //
-// Intent for the hand: Outputs (RxPDO, SM2) = 150 bytes, Inputs (TxPDO, SM3) = 180 bytes.
+// Intent for the hand: Outputs (RxPDO, SM2) = 260 bytes @ 0x1100,
+//                      Inputs  (TxPDO, SM3) = 260 bytes @ 0x1410.
+// Both are 3-buffer mode, so Outputs physically spans 0x1100..0x140B.
 // If the device's SII EEPROM is mis-flashed, SOEM will report them swapped
-// (Obytes=180 / Ibytes=150). This tool prints, for every slave, the full picture
+// (Obytes/Ibytes swapped). This tool prints, for every slave, the full picture
 // from THREE independent sources so you can see exactly where they disagree:
 //
 //   1. Mapped result      : slave.Obytes/Ibytes + FMMU directions (what SOEM will copy)
@@ -97,8 +99,8 @@ void dumpEscRegisters(int i)
                   << "  length=" << std::dec << len
                   << "  ctrl=0x" << std::hex << std::setw(2) << std::setfill('0') << (ctrl & 0xFF)
                   << std::dec << std::setfill(' ');
-        if (sm == 2) std::cout << "   <-- SM2 should be Outputs/command = 150";
-        if (sm == 3) std::cout << "   <-- SM3 should be Inputs/state    = 180";
+        if (sm == 2) std::cout << "   <-- SM2 should be Outputs/command = 260 @ 0x1100";
+        if (sm == 3) std::cout << "   <-- SM3 should be Inputs/state    = 260 @ 0x1410";
         std::cout << "\n";
     }
     std::cout << "    SOEM SMtype[]: ";
@@ -139,8 +141,8 @@ void dumpSiiEeprom(int i)
                       << "  Creg=0x" << std::hex << std::setw(2) << std::setfill('0') << (int)cur.Creg
                       << "  Activate=0x" << std::setw(2) << (int)cur.Activate
                       << std::dec << std::setfill(' ');
-            if (n == 2) std::cout << "   <-- intended 150";
-            if (n == 3) std::cout << "   <-- intended 180";
+            if (n == 2) std::cout << "   <-- intended 260";
+            if (n == 3) std::cout << "   <-- intended 260";
             std::cout << "\n";
         }
     } else {
@@ -247,15 +249,27 @@ int main(int argc, char** argv)
         dumpCoe(i);
 
         // Verdict against the stated intent.
-        std::cout << "  --- VERDICT (intent: Outputs=150, Inputs=180) ---\n";
-        const bool ok = (s.Obytes == 150 && s.Ibytes == 180);
+        std::cout << "  --- VERDICT (intent: Outputs=260, Inputs=260) ---\n";
+        const bool ok = (s.Obytes == 260 && s.Ibytes == 260);
         if (ok) {
             std::cout << "    OK: device matches intent.\n";
         } else {
-            std::cout << "    MISMATCH: Obytes=" << s.Obytes << " (want 150), Ibytes="
-                      << s.Ibytes << " (want 180).\n";
-            if (s.Obytes == 180 && s.Ibytes == 150)
-                std::cout << "    => SM2/SM3 are SWAPPED in the SII EEPROM. Re-flash SII.\n";
+            std::cout << "    MISMATCH: Obytes=" << s.Obytes << " (want 260), Ibytes="
+                      << s.Ibytes << " (want 260).\n";
+        }
+
+        // Both directions are 260 bytes now, so a swapped SM2/SM3 no longer
+        // shows up as a size mismatch — check the declared *directions* instead.
+        // SMtype[] comes from 0x1C00 / SII; 3 = Outputs, 4 = Inputs.
+        if (s.SMtype[2] != 3 || s.SMtype[3] != 4) {
+            std::cout << "    => SM DIRECTIONS SWAPPED: SMtype[2]=" << int(s.SMtype[2])
+                      << " SMtype[3]=" << int(s.SMtype[3])
+                      << " (want 3=Outputs, 4=Inputs). The direct-SM workaround in\n"
+                      << "       ethercat_connection.cpp is still required.\n";
+        } else {
+            std::cout << "    => SM directions are correct (SM2=Outputs, SM3=Inputs).\n"
+                      << "       The direct-SM workaround may no longer be needed;\n"
+                      << "       ecx_send_processdata() should route correctly.\n";
         }
     }
 
