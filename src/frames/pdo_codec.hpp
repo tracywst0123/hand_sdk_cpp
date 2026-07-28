@@ -17,14 +17,15 @@ static_assert(hand_sdk::frames::kNumJoints == kNumJoints,
 static_assert(sizeof(hand_sdk::frames::ServiceBlock::data) == sizeof(ServiceData::data),
               "message and PDO service payloads disagree");
 
+
 // float -> int16 for the wire.
 //
 // A plain static_cast of an out-of-range or non-finite float to int16_t is
-// undefined behaviour, not a wrap. Commands reach this function from holder2,
-// which accepts whatever any thread writes into it — a ROS topic, a teleop
-// stream, an unvalidated planner — so the guard belongs here rather than in a
-// convention that callers are trusted to follow. NaN becomes 0 because there is
-// no sensible joint value to fall back to and 0 is what an unset field holds.
+// undefined behaviour, not a wrap. Commands reach here from holder2, which
+// accepts whatever any thread writes into it, and the cast then executes inside
+// the real-time cycle — so the guard belongs here rather than in a convention
+// callers are trusted to follow. NaN becomes 0: there is no sensible joint
+// value to fall back to, and 0 is what an unset field already holds.
 inline int16_t toWire(float v)
 {
     if (std::isnan(v)) {

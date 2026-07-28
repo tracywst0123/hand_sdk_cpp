@@ -29,12 +29,17 @@ public:
     bool hasRight() const;
 
     // Exchange the process-data buffers on the wire. Driven by CyclicTask on the
-    // DC grid; sendCommand() only fills the output buffer and readState() only
-    // decodes the input buffer — neither touches the network.
+    // DC grid, and the only call here that touches the network.
     bool update();
 
+    // Decode the input buffer filled by the last update(). No network access.
     bool readState(frames::DualHandState& state);
-    bool sendCommand(const frames::DualHandCommand& command);
+
+    // Encode into the output buffer that the next update() will transmit. No
+    // network access — hence "stage", not "send". Deliberately not called
+    // sendCommand(): that name belongs to Api, where it means something quite
+    // different (hand the command to the cyclic thread via holder2).
+    bool stageCommand(const frames::DualHandCommand& command);
 
     // --- Distributed Clocks ------------------------------------------------
 
@@ -42,7 +47,7 @@ public:
     // Phase-lock the cyclic task against this; see hand_sdk::rt::CyclicTimer.
     int64_t dcTime() const { return dc_time_; }
 
-    // True once the SYNC0/SYNC1 cyclic units have been armed on the hands.
+    // True once the SYNC0 cyclic units have been armed on the hands.
     bool dcActive() const { return dc_active_; }
 
     int leftSlaveId() const { return left_slave_id_; }
@@ -122,13 +127,14 @@ private:
     uint8_t right_out_[kOutBytes]{};
     uint8_t right_in_[kInBytes]{};
 
+    // AL state sampled at connect() and disconnect(); see captureStatus().
+    SlaveStatus left_status_{};
+    SlaveStatus right_status_{};
+
     // Written by ecx_config_map_group() and then never read: we address the
     // SyncManagers directly rather than through logical addressing. The call is
     // still required — it is what configures the SMs on the slaves — so the
     // buffer has to exist even though the IOmap it produces goes unused.
-    SlaveStatus left_status_{};
-    SlaveStatus right_status_{};
-
     static constexpr int kIomapSize = 4096;
     uint8_t iomap_[kIomapSize]{};
 

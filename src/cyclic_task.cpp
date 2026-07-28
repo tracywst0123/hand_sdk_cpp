@@ -95,7 +95,7 @@ void CyclicTask::run()
         if (commands_.tryRead(command, 4) == 0) {
             command_underruns_.fetch_add(1, std::memory_order_relaxed);
         }
-        connection_.sendCommand(command);
+        connection_.stageCommand(command);
 
         if (!connection_.update()) {
             exchange_failures_.fetch_add(1, std::memory_order_relaxed);

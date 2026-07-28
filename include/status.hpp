@@ -50,8 +50,9 @@ struct SlaveStatus
 struct SyncDiagnostics
 {
     bool valid{false};
-    uint16_t out_sync_type{0};        // 0x1C32:01 — expect 0x0002 (DC SYNC0)
-    uint16_t in_sync_type{0};         // 0x1C33:01 — expect 0x0003 (DC SYNC1)
+    // Both expect 0x0002 (DC SYNC0): this device does not implement SYNC1.
+    uint16_t out_sync_type{0};        // 0x1C32:01
+    uint16_t in_sync_type{0};         // 0x1C33:01
     uint16_t out_cycle_exceeded{0};   // 0x1C32:0B — must not climb
     uint16_t in_cycle_exceeded{0};    // 0x1C33:0B — must not climb
     uint16_t out_shift_too_short{0};  // 0x1C32:0C

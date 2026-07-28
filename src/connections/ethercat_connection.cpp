@@ -79,7 +79,7 @@ std::string EthercatConnection::connect()
     // Switch the CoE application to DC mode while we are still in PREOP, where
     // 0x1C32/0x1C33 are writable. Arming the ESC pulses further down is not
     // necessarily enough on its own — the application also has to be told to act
-    // on SYNC0/SYNC1 instead of on SyncManager events.
+    // on SYNC0 instead of on SyncManager events.
     if (config_.dc.enabled && config_.dc.write_sync_type) {
         for (int i = 1; i <= context_.slavecount; ++i) {
             const bool is_hand =
@@ -172,15 +172,23 @@ std::string EthercatConnection::connect()
 
     // Station addresses for the FPWR/FPRD addressing exchangeRaw() uses to reach
     // the (physically correct) SyncManager regions directly.
+    // Addresses and sizes come from the constants, never from a literal in the
+    // string — these logs are what you compare against ecat_dump, so they must
+    // not be able to drift away from what exchangeRaw() actually uses.
+    const auto logHand = [this](const char* tag, uint16_t addr) {
+        std::clog << "[EtherCAT] " << tag << " hand: configadr=0x" << std::hex << addr
+                  << " (direct SM access SM2@0x" << kSmOutAddr << " " << std::dec << kOutBytes
+                  << " B / SM3@0x" << std::hex << kSmInAddr << " " << std::dec << kInBytes
+                  << " B)" << std::endl;
+    };
+
     if (left_slave_id_ != -1) {
         left_addr_ = context_.slavelist[left_slave_id_].configadr;
-        std::clog << "[EtherCAT] Left hand: configadr=0x" << std::hex << left_addr_ << std::dec
-                  << " (direct SM access SM2@0x1100/SM3@0x1400)" << std::endl;
+        logHand("Left ", left_addr_);
     }
     if (right_slave_id_ != -1) {
         right_addr_ = context_.slavelist[right_slave_id_].configadr;
-        std::clog << "[EtherCAT] Right hand: configadr=0x" << std::hex << right_addr_ << std::dec
-                  << " (direct SM access SM2@0x1100/SM3@0x1400)" << std::endl;
+        logHand("Right", right_addr_);
     }
 
     bool op_ready = false;
@@ -366,7 +374,7 @@ bool EthercatConnection::readState(frames::DualHandState& state)
     return true;
 }
 
-bool EthercatConnection::sendCommand(const frames::DualHandCommand& command)
+bool EthercatConnection::stageCommand(const frames::DualHandCommand& command)
 {
     if (!connected_) {
         return false;

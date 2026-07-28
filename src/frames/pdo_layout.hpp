@@ -74,7 +74,7 @@ struct ReadPDO
 #pragma pack(pop)
 
 // These sizes bound the memcpys in EthercatConnection::readState() and
-// sendCommand(), and must equal the SyncManager sizes the device advertises.
+// stageCommand(), and must equal the SyncManager sizes the device advertises.
 // A layout edit that changed a size would otherwise run those copies past the
 // end of the process-data buffers, or leave part of the PDO unwritten.
 static_assert(sizeof(JointEntry) == 6, "JointEntry must pack to 6 bytes");
