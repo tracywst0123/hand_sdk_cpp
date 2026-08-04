@@ -1,8 +1,5 @@
 #include "ethercat_connection.hpp"
 
-#include "../frames/pdo_codec.hpp"
-#include "../frames/pdo_layout.hpp"
-
 extern "C" {
 #include <soem/soem.h>
 }
@@ -76,10 +73,8 @@ std::string EthercatConnection::connect()
         std::clog << "  [" << i << "] '" << context_.slavelist[i].name << "'" << std::endl;
     }
 
-    // Switch the CoE application to DC mode while we are still in PREOP, where
-    // 0x1C32/0x1C33 are writable. Arming the ESC pulses further down is not
-    // necessarily enough on its own — the application also has to be told to act
-    // on SYNC0 instead of on SyncManager events.
+    // Tell the CoE application to act on SYNC0, while still in PREOP where
+    // 0x1C32/0x1C33 are writable (notes.md, "DC-Synchron bring-up").
     if (config_.dc.enabled && config_.dc.write_sync_type) {
         for (int i = 1; i <= context_.slavecount; ++i) {
             const bool is_hand =
@@ -120,12 +115,8 @@ std::string EthercatConnection::connect()
     }
 
     // --- Arm the DC cyclic unit (DC-Synchron) -------------------------------
-    // The hands' ESI declares DC-Synchron, but the cyclic-unit activation
-    // register (0x0981) is volatile: whatever a previous master armed is gone
-    // after a power cycle. So we arm it here on every connect.
-    //
-    // ecx_configdc() above only elected the reference clock and programmed the
-    // per-slave propagation-delay offsets — it does not start any SYNC pulse.
+    // 0x0981 is volatile, so it is re-armed on every connect; ecx_configdc()
+    // above starts no pulse of its own.
     if (config_.dc.enabled) {
         if (!context_.slavelist[0].hasdc) {
             ecx_close(&context_);
@@ -139,10 +130,8 @@ std::string EthercatConnection::connect()
             if (id == -1) {
                 continue;
             }
-            // SYNC0 only: ecx_dcsync0() writes 0x0981 = 0x03, exactly the
-            // activation the ESI's <AssignActivate>#x300</AssignActivate> asks
-            // for. ecx_dcsync01() would write 0x07 and enable a SYNC1 this
-            // device does not implement (0x1C32:04 bit 3 clear).
+            // SYNC0 only — the device implements no SYNC1, so ecx_dcsync0(),
+            // never ecx_dcsync01().
             ecx_dcsync0(&context_, static_cast<uint16_t>(id), TRUE,
                         config_.dc.sync0_cycle_ns,
                         config_.dc.sync0_shift_ns);
@@ -170,11 +159,8 @@ std::string EthercatConnection::connect()
     context_.slavelist[0].state = EC_STATE_OPERATIONAL;
     ecx_writestate(&context_, 0);
 
-    // Station addresses for the FPWR/FPRD addressing exchangeRaw() uses to reach
-    // the (physically correct) SyncManager regions directly.
-    // Addresses and sizes come from the constants, never from a literal in the
-    // string — these logs are what you compare against ecat_dump, so they must
-    // not be able to drift away from what exchangeRaw() actually uses.
+    // Station addresses for the direct SM exchange. Logged from the constants,
+    // never literals, so the log cannot drift from what exchangeRaw() uses.
     const auto logHand = [this](const char* tag, uint16_t addr) {
         std::clog << "[EtherCAT] " << tag << " hand: configadr=0x" << std::hex << addr
                   << " (direct SM access SM2@0x" << kSmOutAddr << " " << std::dec << kOutBytes
@@ -322,14 +308,8 @@ int EthercatConnection::exchangeRaw()
     int wkc = 0;
 
     if (dc_active_) {
-        // Read the reference clock and broadcast it to every slave (FRMW), so
-        // each ESC PLL keeps correcting its own crystal drift. SOEM normally
-        // does this inside ecx_send_processdata_group(), which we bypass — and
-        // without it the SYNC0 pulses walk off our cycle within seconds and the
-        // hands fault with a sync/PLL error.
-        //
-        // Deliberately not summed into wkc: FRMW's working counter counts DC
-        // slaves on the bus, not our two hands.
+        // Refresh the DC reference clock to every slave (FRMW) — load-bearing,
+        // see notes.md. Not summed into wkc: FRMW counts DC slaves, not hands.
         int64_t dct = 0;
         (void)ecx_FRMW(&context_.port, dc_ref_addr_,
                        static_cast<uint16_t>(ECT_REG_DCSYSTIME),
@@ -349,45 +329,39 @@ int EthercatConnection::exchangeRaw()
     return wkc;
 }
 
-bool EthercatConnection::readState(frames::DualHandState& state)
+bool EthercatConnection::copyInputs(frames::pdo::DualReadPDO& raw)
 {
     if (!connected_) {
         return false;
     }
 
-    state = {};
+    raw = {};
 
     if (left_slave_id_ != -1) {
-        frames::pdo::ReadPDO pdo{};
-        std::memcpy(&pdo, left_in_, sizeof(frames::pdo::ReadPDO));
-        state.left     = frames::pdo::decodeReadPDO(pdo);
-        state.has_left = true;
+        std::memcpy(&raw.left, left_in_, sizeof(frames::pdo::ReadPDO));
+        raw.has_left = true;
     }
 
     if (right_slave_id_ != -1) {
-        frames::pdo::ReadPDO pdo{};
-        std::memcpy(&pdo, right_in_, sizeof(frames::pdo::ReadPDO));
-        state.right     = frames::pdo::decodeReadPDO(pdo);
-        state.has_right = true;
+        std::memcpy(&raw.right, right_in_, sizeof(frames::pdo::ReadPDO));
+        raw.has_right = true;
     }
 
     return true;
 }
 
-bool EthercatConnection::stageCommand(const frames::DualHandCommand& command)
+bool EthercatConnection::stageOutputs(const frames::pdo::DualWritePDO& raw)
 {
     if (!connected_) {
         return false;
     }
 
-    if (command.has_left && left_slave_id_ != -1) {
-        auto pdo = frames::pdo::encodeWritePDO(command.left);
-        std::memcpy(left_out_, &pdo, sizeof(frames::pdo::WritePDO));
+    if (raw.has_left && left_slave_id_ != -1) {
+        std::memcpy(left_out_, &raw.left, sizeof(frames::pdo::WritePDO));
     }
 
-    if (command.has_right && right_slave_id_ != -1) {
-        auto pdo = frames::pdo::encodeWritePDO(command.right);
-        std::memcpy(right_out_, &pdo, sizeof(frames::pdo::WritePDO));
+    if (raw.has_right && right_slave_id_ != -1) {
+        std::memcpy(right_out_, &raw.right, sizeof(frames::pdo::WritePDO));
     }
 
     return true;

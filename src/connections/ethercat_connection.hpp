@@ -2,7 +2,6 @@
 
 #include "../../include/config.hpp"
 #include "../../include/status.hpp"
-#include "../../include/messages.hpp"
 #include "../frames/pdo_layout.hpp"
 
 #include <cstdint>
@@ -32,14 +31,13 @@ public:
     // DC grid, and the only call here that touches the network.
     bool update();
 
-    // Decode the input buffer filled by the last update(). No network access.
-    bool readState(frames::DualHandState& state);
+    // Copy the input buffers filled by the last update() out as raw wire
+    // frames. No network access, no interpretation — decoding happens in Api.
+    bool copyInputs(frames::pdo::DualReadPDO& raw);
 
-    // Encode into the output buffer that the next update() will transmit. No
-    // network access — hence "stage", not "send". Deliberately not called
-    // sendCommand(): that name belongs to Api, where it means something quite
-    // different (hand the command to the cyclic thread via holder2).
-    bool stageCommand(const frames::DualHandCommand& command);
+    // Copy raw wire frames into the output buffers the next update() will
+    // transmit. No network access — hence "stage", not "send".
+    bool stageOutputs(const frames::pdo::DualWritePDO& raw);
 
     // --- Distributed Clocks ------------------------------------------------
 
@@ -78,23 +76,11 @@ private:
     // PREOP only; failures are logged, not fatal.
     void writeSyncType(int slave_id, uint16_t index, uint16_t sync_type);
 
-    // --- Direct SM access constants (workaround for swapped 0x1C00 / FMMUs) ---
-    // The slaves were observed to describe their SyncManager directions backwards
-    // over CoE (0x1C00), so SOEM programs the FMMUs reversed and LRW process data
-    // is mis-routed. We bypass logical addressing and talk to the ESC SyncManager
-    // regions directly. Addresses come from the device ESI:
-    //   <Sm DefaultSize="260" StartAddress="#x1100" ControlByte="#x64">Outputs</Sm>
-    //   <Sm DefaultSize="260" StartAddress="#x1410" ControlByte="#x20">Inputs</Sm>
-    //
-    // 0x1410 is not arbitrary: both SMs are 3-buffer mode (ControlByte bits 0-1 =
-    // 00), so Outputs reserves 3 x 260 = 780 B spanning 0x1100..0x140B, and Inputs
-    // starts at the next aligned address above that. Addressing inputs at 0x1400
-    // would read back part of the third *output* buffer.
-    //
-    // NOTE: the ESI shipped with these devices now lists 0x1C00 as 1,2,3,4 — the
-    // correct, un-swapped order. If the firmware agrees, this whole direct-SM
-    // detour can go away in favour of ecx_send_processdata(). Confirm with
-    // ecat_dump against live registers before changing it.
+    // --- Direct SM access (workaround for swapped 0x1C00 / FMMUs) -----------
+    // The slaves describe their SM directions backwards over CoE, so LRW via
+    // FMMUs is mis-routed; we address the ESC SyncManager regions directly.
+    // Address derivation, ESI evidence, and when this detour can be removed:
+    // notes.md, "Direct SM access".
     static constexpr uint16_t kSmOutAddr = 0x1100; // command region (master writes)
     static constexpr uint16_t kSmInAddr  = 0x1410; // state region   (master reads)
 

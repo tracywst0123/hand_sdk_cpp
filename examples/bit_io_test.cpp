@@ -16,7 +16,7 @@
 //
 // Assumes exactly one slave on the bus.
 
-#include "../src/frames/bit_device.hpp"
+#include "bit_device.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -125,7 +125,7 @@ int main(int argc, char** argv)
     const std::size_t in_bits   = slave.Ibits;
     const std::size_t out_bits  = slave.Obits;
     const std::size_t in_start  = slave.Istartbit;
-    const std::size_t in_bytes  = hand_sdk::frames::bit_device::byteSpan(in_start, in_bits);
+    const std::size_t in_bytes  = bit_device::byteSpan(in_start, in_bits);
 
     std::cout << "[bit_io] slave '" << slave.name << "': "
               << "Ibits=" << in_bits << " (Istartbit=" << in_start << ", Ibytes=" << slave.Ibytes << ") "
@@ -144,7 +144,7 @@ int main(int argc, char** argv)
     }
 
     const std::size_t out_bytes =
-        hand_sdk::frames::bit_device::byteSpan(slave.Ostartbit, out_bits);
+        bit_device::byteSpan(slave.Ostartbit, out_bits);
 
     // Display exactly the first 8 input bit channels (DI switches 1..8).
     constexpr std::size_t kDisplayChannels = 8;
@@ -152,7 +152,7 @@ int main(int argc, char** argv)
     std::cout << "[bit_io] reading inputs (Ctrl-C to stop). Showing "
               << kDisplayChannels << " channels; channel 0 is the rightmost bit.\n";
 
-    namespace bd = hand_sdk::frames::bit_device;
+    namespace bd = bit_device;
 
     // EtherCAT output watchdog (~100 ms typical) clears outputs unless process
     // data is exchanged frequently. Exchange fast; print at a human rate.

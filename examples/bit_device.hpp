@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <string>
 
-namespace hand_sdk::frames::bit_device
+namespace bit_device
 {
 
 // Read a single bit out of a byte buffer.
@@ -97,4 +97,4 @@ inline std::string formatHex(const uint8_t* base, std::size_t num_bytes)
     return out;
 }
 
-} // namespace hand_sdk::frames::bit_device
+} // namespace bit_device

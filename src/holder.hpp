@@ -14,13 +14,8 @@ namespace hand_sdk
 // Implemented as a seqlock: the writer bumps the sequence to odd, copies, then
 // bumps it to even. A reader that sees an odd sequence, or sees the sequence
 // change across its copy, knows it read a half-written value and retries.
-//
-// Why not a mutex. One side of each holder is the EtherCAT cycle thread running
-// at SCHED_FIFO. If it blocked on a lock held by a preempted normal-priority
-// thread it would miss its SYNC0 deadline, and on a single core it would spin
-// forever — the lock holder can never be scheduled to release it. That is also
-// why tryRead() takes an attempt limit: the real-time side gives up and reuses
-// the value it already has rather than spinning against a stalled writer.
+// Why not a mutex: notes.md, "Holder".
+
 template <typename T>
 class Holder
 {

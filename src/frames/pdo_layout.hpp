@@ -19,9 +19,11 @@ namespace hand_sdk::frames::pdo
 constexpr std::size_t kNumJoints = 21;
 
 constexpr std::size_t kNumPdoWords    = 130;
+
+// Service payload word meaning "no action / no value here".
+constexpr uint16_t kIgnoreWord = 0xFFFF;
 constexpr std::size_t kJointWords     = kNumJoints * 3;  // 63: angle+speed+torque
-constexpr std::size_t kServiceDataWords = kNumJoints * 3; // 63: opaque, see ServiceData
-constexpr std::size_t kServiceWords    = 1 + kServiceDataWords;  // 64: cmd + payload
+constexpr std::size_t kServiceWords    = 1 + kJointWords;  // 64: cmd + payload
 constexpr std::size_t kErrorWords      = 2;              // Error_L, Error_H
 
 // Trailing words the device maps but we do not interpret.
@@ -39,13 +41,10 @@ struct JointEntry
     int16_t torque;
 };
 
-// A command word followed by 63 further words. These are not joint triples —
-// the ESI names them only OutDate1..67 / InDate1..65 and documents no meaning
-// for any of them, so they are carried opaquely rather than interpreted.
 struct ServiceData
 {
     int16_t cmd;
-    int16_t data[kServiceDataWords];
+    int16_t data[kJointWords]; 
 };
 
 struct ErrorEntry
@@ -73,8 +72,31 @@ struct ReadPDO
 
 #pragma pack(pop)
 
-// These sizes bound the memcpys in EthercatConnection::readState() and
-// stageCommand(), and must equal the SyncManager sizes the device advertises.
+// Both hands' frames plus presence flags, as one trivially-copyable value.
+// This is what the CyclicTask holders carry: the cyclic thread moves these
+// verbatim between holder and SyncManager buffers, and the float conversion
+// happens above, in Api, on whatever thread the user called from.
+//
+// Not packed: only the WritePDO/ReadPDO members are wire images. The wrapper
+// itself never crosses the wire, so it can keep natural alignment.
+struct DualWritePDO
+{
+    bool has_left{false};
+    WritePDO left{};
+    bool has_right{false};
+    WritePDO right{};
+};
+
+struct DualReadPDO
+{
+    bool has_left{false};
+    ReadPDO left{};
+    bool has_right{false};
+    ReadPDO right{};
+};
+
+// These sizes bound the memcpys in EthercatConnection::copyInputs() and
+// stageOutputs(), and must equal the SyncManager sizes the device advertises.
 // A layout edit that changed a size would otherwise run those copies past the
 // end of the process-data buffers, or leave part of the PDO unwritten.
 static_assert(sizeof(JointEntry) == 6, "JointEntry must pack to 6 bytes");

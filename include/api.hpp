@@ -3,9 +3,11 @@
 #include "config.hpp"
 #include "status.hpp"
 #include "messages.hpp"
+#include "service.hpp"
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 
 namespace hand_sdk
@@ -51,6 +53,10 @@ struct HandsStatus
 // you saw last call, and sendCommand() is delivered on the next cycle rather
 // than immediately. Use the sequence counters to tell those apart when it
 // matters.
+//
+// Exception: the service*() calls are blocking request/response round-trips
+// (~10 ms each — one 10-cycle bus window); do not call them from a real-time
+// context.
 class Api
 {
 public:
@@ -68,11 +74,12 @@ public:
 
     // --- Data path ----------------------------------------------------------
 
-    // Newest state published by the cyclic thread (holder1). Fails only if the
-    // bus has not published anything yet.
+    // Newest state published by the cyclic thread (the state holder): joint
+    // states plus the per-motor error bits (HandState::error_bits). Fails
+    // only if the bus has not published anything yet.
     Result<frames::DualHandState> readState();
 
-    // Hand a command to the cyclic thread (holder2); it goes out on the next
+    // Hand a command to the cyclic thread (the command holder); it goes out on the next
     // DC cycle. Returns as soon as the value is stored.
     Result<void> sendCommand(const frames::DualHandCommand& command);
 
@@ -80,6 +87,30 @@ public:
     // whether the bus has produced new state, or consumed your commands.
     uint64_t stateSequence() const;
     uint64_t commandSequence() const;
+
+    // --- Service channel ----------------------------------------------------
+    // Blocking request/response calls over the PDO service words. Each call
+    // owns the channel for one 10-cycle window (~10 ms at 1 kHz). No queueing:
+    // a call made while another is in flight fails immediately with
+    // "another service call is in progress". See include/service.hpp for types.
+
+    // cmd 4: start/stop broadcast responses. Write-only on the device, so
+    // success means the request was held for the full window.
+    Result<void> serviceComm(service::Hand hand, service::ComCmd cmd);
+
+    // cmd 11: set closed-loop mode and control enable; returns the per-joint
+    // mode/enable the device reports back.
+    Result<service::ModeStatusArray> serviceMode(service::Hand hand,
+                                                 service::LoopMode mode,
+                                                 bool enable);
+
+    // cmd 12 (read-only): per-joint motor-control state and fault code.
+    Result<service::McStatusArray> serviceMcState(service::Hand hand);
+
+    // cmd 14: set force-mode position loop gains (applied to all joints);
+    // returns the per-joint gains the device reports back.
+    Result<service::JointGainsArray> serviceGains(service::Hand hand,
+                                                  float kp, float kd);
 
     // --- Status -------------------------------------------------------------
 
@@ -99,6 +130,10 @@ public:
 
 private:
     std::unique_ptr<CyclicTask> task_;
+
+    // Serializes service calls (one window in flight) and guards service_seq_.
+    std::mutex service_mutex_;
+    uint64_t service_seq_{0};
 };
 
 } // namespace hand_sdk

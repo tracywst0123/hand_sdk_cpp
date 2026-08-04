@@ -8,36 +8,17 @@ namespace hand_sdk::frames
 
 constexpr std::size_t kNumJoints = 21;
 
-// A command word plus a block of opaque service words, carried alongside the
-// joint data in both PDO directions.
-//
-// The device ESI names these entries only OutDate1..OutDate67 (RxPDO) and
-// InDate1..InDate65 (TxPDO) and documents no meaning for any of them, so they
-// are passed through as raw device words rather than decoded into anything.
-// Raw int16 also round-trips exactly — no clamping, no float conversion, and
-// nothing lost in either direction.
-//
-// Until the vendor says what `cmd` selects, leaving it at 0 is the only
-// defensible default; it is sent to the hands on every cycle.
-struct ServiceBlock
-{
-    static constexpr std::size_t kNumWords = kNumJoints * 3;  // 63
-
-    int16_t cmd{0};
-    std::array<int16_t, kNumWords> data{};
-};
-
+// Engineering units: q in rad, dq in rad/s, tau in N*m. The wire carries
+// fixed-point int16 words; Api converts on the calling thread.
 struct HandState
 {
-    std::array<float, kNumJoints> q{};    // positions
-    std::array<float, kNumJoints> dq{};   // velocities
-    std::array<float, kNumJoints> tau{};  // torques
+    std::array<float, kNumJoints> q{};    // positions  [rad]
+    std::array<float, kNumJoints> dq{};   // velocities [rad/s]
+    std::array<float, kNumJoints> tau{};  // torques    [N*m]
 
-    // TxPDO Error_L / Error_H (0x6010:64 and :65). Raw device words.
-    uint16_t error1{0};
-    uint16_t error2{0};
-
-    ServiceBlock service_data{};
+    // Per-motor fault bits from TxPDO Error_L/Error_H: bit i = motor i,
+    // 1 = fault, 0 = normal. Bits 21..31 unused.
+    uint32_t error_bits{0};
 };
 
 struct HandCommand
@@ -45,9 +26,10 @@ struct HandCommand
     std::array<float, kNumJoints> q{};
     std::array<float, kNumJoints> dq{};
     std::array<float, kNumJoints> tau{};
-
-    ServiceBlock service_data{};
 };
+
+// The PDO service channel (cmd + 3 words per joint) is not part of these
+// message types: it is owned by the Api service calls (include/service.hpp).
 
 struct DualHandState
 {

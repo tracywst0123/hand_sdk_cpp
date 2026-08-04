@@ -17,7 +17,7 @@ struct CycleStats
 {
     uint64_t cycles{0};             // exchanges completed
     uint64_t exchange_failures{0};  // bad working counter (a slave did not answer)
-    uint64_t command_underruns{0};  // lost the race on holder2; reused last command
+    uint64_t command_underruns{0};  // lost the race on the command holder; reused last
     int64_t phase_error_ns{0};      // distance from the target DC phase
     bool running{false};
 };

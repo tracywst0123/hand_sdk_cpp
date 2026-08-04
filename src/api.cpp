@@ -1,8 +1,12 @@
 #include "../include/api.hpp"
 
 #include "cyclic_task.hpp"
+#include "frames/pdo_codec.hpp"
+#include "frames/service_codec.hpp"
 
+#include <chrono>
 #include <exception>
+#include <thread>
 #include <utility>
 
 namespace hand_sdk
@@ -12,6 +16,61 @@ namespace
 // User threads are not real-time, so they can afford to keep retrying a torn
 // read. The cyclic thread uses a much smaller limit; see Holder::tryRead().
 constexpr int kUserReadAttempts = 64;
+
+// A service window is 10 cycles (~10 ms at 1 kHz); the timeout leaves room
+// for a window already in flight plus bus hiccups.
+constexpr auto kServicePoll    = std::chrono::milliseconds(1);
+constexpr auto kServiceTimeout = std::chrono::milliseconds(100);
+
+Result<void> checkHand(CyclicTask& task, service::Hand hand)
+{
+    if (!task.isRunning()) {
+        return {false, "not connected"};
+    }
+    if (hand == service::Hand::kLeft && !task.hasLeft()) {
+        return {false, "left hand not connected"};
+    }
+    if (hand == service::Hand::kRight && !task.hasRight()) {
+        return {false, "right hand not connected"};
+    }
+    return {true, {}};
+}
+
+// One service round-trip: post the ticket, then poll the reply holder until
+// the cyclic thread captures a reply with our id. Caller holds service_mutex_
+// and has checked hand presence.
+Result<frames::pdo::ServiceData> runService(CyclicTask& task,
+                                            service::Hand hand,
+                                            uint64_t id,
+                                            const frames::pdo::ServiceData& request)
+{
+    ServiceTicket ticket{};
+    ticket.id      = id;
+    ticket.left    = hand == service::Hand::kLeft;
+    ticket.right   = hand == service::Hand::kRight;
+    ticket.request = request;
+    task.serviceRequests().write(ticket);
+
+    const auto deadline = std::chrono::steady_clock::now() + kServiceTimeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (!task.isRunning()) {
+            return {false, "connection lost during service call"};
+        }
+        ServiceReply reply{};
+        if (task.serviceReplies().tryRead(reply, kUserReadAttempts) != 0 &&
+            reply.id == id) {
+            if (ticket.left && reply.has_left) {
+                return {true, "OK", reply.left};
+            }
+            if (ticket.right && reply.has_right) {
+                return {true, "OK", reply.right};
+            }
+            return {false, "no reply from the targeted hand"};
+        }
+        std::this_thread::sleep_for(kServicePoll);
+    }
+    return {false, "service reply timed out"};
+}
 } // namespace
 
 Api::Api(Config config) : task_(std::make_unique<CyclicTask>(std::move(config))) {}
@@ -50,11 +109,13 @@ Result<frames::DualHandState> Api::readState()
         if (!task_->isRunning()) {
             return {false, "not connected"};
         }
-        frames::DualHandState state{};
-        if (task_->states().tryRead(state, kUserReadAttempts) == 0) {
+        // The holder hands over raw wire frames; decoding to floats happens
+        // here, on the caller's thread, keeping the cyclic loop copy-only.
+        frames::pdo::DualReadPDO raw{};
+        if (task_->states().tryRead(raw, kUserReadAttempts) == 0) {
             return {false, "no state published yet"};
         }
-        return {true, "OK", state};
+        return {true, "OK", frames::pdo::decodeReadPDO(raw)};
     } catch (const std::exception& e) {
         return {false, e.what()};
     }
@@ -66,11 +127,100 @@ Result<void> Api::sendCommand(const frames::DualHandCommand& command)
         if (!task_->isRunning()) {
             return {false, "not connected"};
         }
-        task_->commands().write(command);
+        // Encode on the caller's thread — clamping and NaN guards included —
+        // so the cyclic thread only ever copies ready-to-send frames.
+        task_->commands().write(frames::pdo::encodeWritePDO(command));
         return {true, "OK"};
     } catch (const std::exception& e) {
         return {false, e.what()};
     }
+}
+
+Result<void> Api::serviceComm(service::Hand hand, service::ComCmd cmd)
+{
+    std::unique_lock<std::mutex> lock(service_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        return {false, "another service call is in progress"};
+    }
+    if (auto err = checkHand(*task_, hand); !err.success) {
+        return {false, err.msg};
+    }
+    const auto raw = runService(*task_, hand, ++service_seq_,
+                                frames::pdo::encodeComm(cmd));
+    if (!raw.success) {
+        return {false, raw.msg};
+    }
+    // Write-only service: the reply carries no meaningful payload.
+    return {true, "OK"};
+}
+
+Result<service::ModeStatusArray> Api::serviceMode(service::Hand hand,
+                                                  service::LoopMode mode,
+                                                  bool enable)
+{
+    std::unique_lock<std::mutex> lock(service_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        return {false, "another service call is in progress"};
+    }
+    if (auto err = checkHand(*task_, hand); !err.success) {
+        return {false, err.msg};
+    }
+    const auto raw = runService(*task_, hand, ++service_seq_,
+                                frames::pdo::encodeMode(mode, enable));
+    if (!raw.success) {
+        return {false, raw.msg};
+    }
+    service::ModeStatusArray out{};
+    if (!frames::pdo::decodeMode(raw.value, out)) {
+        return {false, "reply cmd mismatch (expected 11, got " +
+                           std::to_string(raw.value.cmd) + ")"};
+    }
+    return {true, "OK", out};
+}
+
+Result<service::McStatusArray> Api::serviceMcState(service::Hand hand)
+{
+    std::unique_lock<std::mutex> lock(service_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        return {false, "another service call is in progress"};
+    }
+    if (auto err = checkHand(*task_, hand); !err.success) {
+        return {false, err.msg};
+    }
+    const auto raw = runService(*task_, hand, ++service_seq_,
+                                frames::pdo::encodeMcQuery());
+    if (!raw.success) {
+        return {false, raw.msg};
+    }
+    service::McStatusArray out{};
+    if (!frames::pdo::decodeMc(raw.value, out)) {
+        return {false, "reply cmd mismatch (expected 12, got " +
+                           std::to_string(raw.value.cmd) + ")"};
+    }
+    return {true, "OK", out};
+}
+
+Result<service::JointGainsArray> Api::serviceGains(service::Hand hand,
+                                                   float kp, float kd)
+{
+    std::unique_lock<std::mutex> lock(service_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        return {false, "another service call is in progress"};
+    }
+    if (auto err = checkHand(*task_, hand); !err.success) {
+        return {false, err.msg};
+    }
+    const auto raw = runService(*task_, hand, ++service_seq_,
+                                frames::pdo::encodeGains(kp, kd));
+    if (!raw.success) {
+        return {false, raw.msg};
+    }
+    service::JointGainsArray out{};
+    if (!frames::pdo::decodeGains(raw.value, out)) {
+        return {false, "reply cmd mismatch (expected 14, got " +
+                           std::to_string(raw.value.cmd) + ")"};
+    }
+    return {true, "OK", out};
 }
 
 uint64_t Api::stateSequence() const

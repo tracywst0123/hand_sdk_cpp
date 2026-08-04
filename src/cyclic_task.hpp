@@ -1,10 +1,9 @@
 #pragma once
 
 #include "../include/config.hpp"
-#include "holder.hpp"
 #include "../include/status.hpp"
 #include "connections/ethercat_connection.hpp"
-#include "../include/messages.hpp"
+#include "holder.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -14,17 +13,42 @@
 namespace hand_sdk
 {
 
+// A service request handed to the cyclic thread. Written by user threads
+// (serialized in Api); `id` makes each call distinguishable from the last.
+struct ServiceTicket
+{
+    uint64_t id{0};  // 0 = empty
+    bool left{false};
+    bool right{false};
+    frames::pdo::ServiceData request{};
+};
+
+// The reply captured for a ticket, tagged with the same id.
+struct ServiceReply
+{
+    uint64_t id{0};
+    bool has_left{false};
+    bool has_right{false};
+    frames::pdo::ServiceData left{};
+    frames::pdo::ServiceData right{};
+};
+
 // The bottom layer.
 //
 // Owns the EtherCAT connection and a real-time thread that, once per DC cycle:
-//   1. takes the newest command out of `commands()`  (holder2)
-//   2. exchanges it on the wire
-//   3. publishes the state that came back into `states()`  (holder1)
+//   1. takes the newest command frames out of `commands()`, the command holder
+//   2. exchanges them on the wire
+//   3. publishes the state frames that came back into `states()`, the state holder
 //
 // Nothing above this class touches the connection or the wire. The user layer
-// only reads holder1 and writes holder2, which is what decouples control-code
-// timing from bus timing: user code can run at 50 Hz, or stall for a whole
-// second, and the bus still gets fed every millisecond on the DC grid.
+// only reads the state holder and writes the command holder, which decouples
+// control-code timing from bus timing: user code can run at 50 Hz, or stall
+// for a whole second, and the bus still gets fed every millisecond.
+//
+// The holders carry *wire-format* frames (pdo::DualWritePDO / pdo::DualReadPDO),
+// already encoded / not yet decoded. Api does the float<->int16 codec work on
+// the calling user thread, so the cyclic loop below is nothing but memcpys —
+// the whole RT cycle is copies of fixed-size PODs, no arithmetic.
 class CyclicTask
 {
 public:
@@ -42,13 +66,21 @@ public:
 
     bool isRunning() const { return running_.load(std::memory_order_acquire); }
 
-    // holder1: bus -> user. Written only by the cyclic thread.
-    Holder<frames::DualHandState>& states() { return states_; }
-    const Holder<frames::DualHandState>& states() const { return states_; }
+    // State holder, bus -> user. Written only by the cyclic thread.
+    Holder<frames::pdo::DualReadPDO>& states() { return states_; }
+    const Holder<frames::pdo::DualReadPDO>& states() const { return states_; }
 
-    // holder2: user -> bus. Written only by user threads.
-    Holder<frames::DualHandCommand>& commands() { return commands_; }
-    const Holder<frames::DualHandCommand>& commands() const { return commands_; }
+    // Command holder, user -> bus. Written only by user threads.
+    Holder<frames::pdo::DualWritePDO>& commands() { return commands_; }
+    const Holder<frames::pdo::DualWritePDO>& commands() const { return commands_; }
+
+    // Service channel, one request/response in flight at a time (Api rejects
+    // a call while one runs). The cyclic thread holds a ticket's request in
+    // the outgoing service words for a 10-cycle window, records the reply
+    // over frames 7-9, publishes the final copy when the window closes, then
+    // reverts to the default block (cmd 0).
+    Holder<ServiceTicket>& serviceRequests() { return service_requests_; }
+    Holder<ServiceReply>& serviceReplies() { return service_replies_; }
 
     CycleStats stats() const;
 
@@ -72,8 +104,11 @@ private:
     Config config_;
     connections::EthercatConnection connection_;
 
-    Holder<frames::DualHandState> states_;
-    Holder<frames::DualHandCommand> commands_;
+    Holder<frames::pdo::DualReadPDO> states_;
+    Holder<frames::pdo::DualWritePDO> commands_;
+
+    Holder<ServiceTicket> service_requests_;
+    Holder<ServiceReply> service_replies_;
 
     std::thread thread_;
     std::atomic<bool> running_{false};
