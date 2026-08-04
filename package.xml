@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>hand_sdk_cpp</name>
+  <version>1.0.1</version>
+  <description>User-space EtherCAT SDK for the hand_200 dexterous hands.</description>
+  <maintainer email="mediawang@gmail.com">tracy</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>cmake</buildtool_depend>
+
+  <export>
+    <build_type>cmake</build_type>
+  </export>
+</package>

@@ -1,0 +1,16 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+# The installed archive already bundles SOEM, so the only link dependencies
+# consumers inherit are pthread and rt.
+if(NOT TARGET hand_sdk::hand_sdk)
+  add_library(hand_sdk::hand_sdk STATIC IMPORTED)
+  set_target_properties(hand_sdk::hand_sdk PROPERTIES
+    IMPORTED_LOCATION "@PACKAGE_CMAKE_INSTALL_LIBDIR@/libhand_sdk.a"
+    INTERFACE_INCLUDE_DIRECTORIES "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@/hand_sdk"
+    INTERFACE_LINK_LIBRARIES "Threads::Threads;rt")
+endif()
+
+check_required_components(hand_sdk)
