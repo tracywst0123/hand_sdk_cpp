@@ -1,18 +1,19 @@
 // Minimal user-layer example.
 //
-//   1. connect, query each hand's motor-control state
+//   1. connect
 //   2. bring-up, one service call per second: start broadcast, enable
 //      force-control, verify the state machine, set gains (3.0, 3.0)
-//   3. once a second: print joint states and the per-motor error bits
+//   3. once a second: write a random q/dq/tau setpoint to joint 0 and read
+//      that joint's q/dq/tau back, plus the per-motor error bits
 //   4. disconnect
 //
 // Only hand_sdk::Api is used here. The bus runs at 1 kHz on its own real-time
 // thread the whole time; this loop just reads states and makes an occasional
 // service round-trip.
 //
-// SAFETY: step 2 ENABLES CONTROL, and the streamed joint command words are
-// zeros — the hands will actively hold position 0 with the gains set below.
-// Keep them free to move.
+// SAFETY: step 2 ENABLES CONTROL. Joints 1..20 are streamed zeros and will
+// actively hold position 0 with the gains set below; joint 0 additionally gets
+// a new random setpoint every second. Keep the hands free to move.
 
 #include <hand_sdk.hpp>
 
@@ -21,6 +22,7 @@
 #include <csignal>
 #include <iomanip>
 #include <iostream>
+#include <random>
 #include <thread>
 
 namespace {
@@ -28,35 +30,24 @@ namespace {
 using namespace std::chrono_literals;
 using hand_sdk::service::Hand;
 
-constexpr int kRunSeconds = 100;
+constexpr auto kRunTime = 15h;
+
+// Deliberately small: joint 0 is driven to these setpoints for real.
+constexpr float kRandQ   = 0.20f;  // [rad]
+constexpr float kRandDq  = 0.50f;  // [rad/s]
+constexpr float kRandTau = 0.05f;  // [N*m]
 
 std::atomic<bool> g_run{true};
 void onSignal(int) { g_run = false; }
 
-void printMcSummary(const char* tag, hand_sdk::Api& api, Hand hand)
-{
-    const auto mc = api.serviceMcState(hand);
-    if (!mc.success) {
-        std::cout << "  " << tag << " mc-state query failed: " << mc.msg << "\n";
-        return;
-    }
-    int faulted = 0;
-    for (const auto& joint : mc.value) {
-        if (joint.state == hand_sdk::service::McState::kFault) {
-            ++faulted;
-        }
-    }
-    std::cout << "  " << tag << " joint0 state="
-              << static_cast<int>(mc.value[0].state)
-              << " fault_code=0x" << std::hex << mc.value[0].fault_code
-              << std::dec << ", " << faulted << "/21 joints in fault\n";
-}
-
 void printState(const char* tag, const hand_sdk::frames::HandState& s)
 {
-    std::cout << "  " << tag << " q[0..2] = " << std::fixed << std::setprecision(3)
-              << s.q[0] << " " << s.q[1] << " " << s.q[2]
-              << "  errors=0x" << std::hex << s.error_bits << std::dec;
+    std::cout << "  " << tag << " joint0 q=" << std::fixed << std::setprecision(3)
+              << s.q[0] << " dq=" << s.dq[0] << " tau=" << s.tau[0]
+              << "  errors=0x" << std::hex << std::setw(8) << std::setfill('0') << s.error_bits
+              << " (Error_L 0x" << std::setw(4) << (s.error_bits & 0xFFFFu)
+              << " Error_H 0x" << std::setw(4) << (s.error_bits >> 16) << ")"
+              << std::dec << std::setfill(' ');
 }
 
 // Bring-up sequence for one hand, pausing 1 s after each service call:
@@ -71,7 +62,8 @@ bool bringUp(hand_sdk::Api& api, const char* tag, Hand hand)
     // 1. start responding to broadcast (power-on default is off).
     const auto comm = api.serviceComm(hand, ComCmd::kStartBroadcast);
     std::cout << "  " << tag << " comm start broadcast: "
-              << (comm.success ? "ok" : comm.msg) << "\n";
+              << (comm.msg) << "\n";
+            //   << (comm.success ? "ok" : comm.msg) << "\n";
     if (!comm.success) {
         return false;
     }
@@ -144,34 +136,72 @@ int main()
     std::cout << "left "  << (connected.value.has_left  ? hand.leftStatus().state_text  : "absent")
               << " | right " << (connected.value.has_right ? hand.rightStatus().state_text : "absent")
               << " | DC " << (hand.dcActive() ? "armed" : "off") << "\n"
-              << "running " << kRunSeconds << " s, Ctrl-C to stop early\n\n";
-
-    if (connected.value.has_left)  { printMcSummary("L", hand, Hand::kLeft); }
-    if (connected.value.has_right) { printMcSummary("R", hand, Hand::kRight); }
-    std::cout << "\n";
+              << "running " << std::chrono::duration_cast<std::chrono::hours>(kRunTime).count()
+              << " h, Ctrl-C to stop early\n\n";
 
     // --- 2. bring-up, one service call per second ----------------------------
-    if (connected.value.has_left && !bringUp(hand, "L", Hand::kLeft)) {
-        std::cout << "  L bring-up aborted\n";
-    }
-    if (connected.value.has_right && !bringUp(hand, "R", Hand::kRight)) {
-        std::cout << "  R bring-up aborted\n";
-    }
-    std::cout << "\n";
+    // std::this_thread::sleep_for(1s);
+    // if (connected.value.has_left && !bringUp(hand, "L", Hand::kLeft)) {
+    //     std::cout << "  L bring-up aborted\n";
+    // }
+    // if (connected.value.has_right && !bringUp(hand, "R", Hand::kRight)) {
+    //     std::cout << "  R bring-up aborted\n";
+    // }
+    // std::cout << "\n";
 
-    // --- 3. loop ------------------------------------------------------------
-    for (int sec = 0; sec < kRunSeconds && g_run; ++sec) {
+    // --- 3. loop: random joint-0 setpoint out, joint-0 state back ------------
+    // std::mt19937 rng{std::random_device{}()};
+    // std::uniform_real_distribution<float> q_dist{-kRandQ, kRandQ};
+    // std::uniform_real_distribution<float> dq_dist{-kRandDq, kRandDq};
+    // std::uniform_real_distribution<float> tau_dist{-kRandTau, kRandTau};
+
+    // An iteration is longer than a second (bringUp sleeps between service
+    // calls), so the run length is a wall-clock deadline, not a loop count.
+    const auto start    = std::chrono::steady_clock::now();
+    const auto deadline = start + kRunTime;
+
+    for (int sec = 0; g_run && std::chrono::steady_clock::now() < deadline; ++sec) {
         std::this_thread::sleep_for(1s);
+        const auto elapsed =
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - start).count();
+        std::cout << "[iter " << sec << " | " << elapsed / 3600 << "h"
+                  << std::setw(2) << std::setfill('0') << (elapsed / 60) % 60 << "m"
+                  << std::setw(2) << (elapsed % 60) << "s]" << std::setfill(' ') << std::endl;
 
-        const auto state = hand.readState();
-        std::cout << "[" << std::setw(3) << sec << "]";
-        if (state.success) {
-            if (state.value.has_left)  { printState("L", state.value.left); }
-            if (state.value.has_right) { printState("R", state.value.right); }
-        } else {
-            std::cout << "  read failed: " << state.msg;
+        if (connected.value.has_left && !bringUp(hand, "L", Hand::kLeft)) {
+            std::cout << "  L bring-up aborted\n";
         }
-        std::cout << std::endl;
+
+    //     // hand_sdk::frames::HandCommand joint0_command;
+    //     // joint0_command.q[0]   = q_dist(rng);
+    //     // joint0_command.dq[0]  = dq_dist(rng);
+    //     // joint0_command.tau[0] = tau_dist(rng);
+
+    //     // hand_sdk::frames::DualHandCommand command;
+    //     // command.has_left  = connected.value.has_left;
+    //     // command.left      = joint0_command;
+    //     // command.has_right = connected.value.has_right;
+    //     // command.right     = joint0_command;
+
+    //     // const auto sent = hand.sendCommand(command);
+
+    //     // std::cout << "[" << std::setw(3) << sec << "] write joint0 q="
+    //     //           << std::fixed << std::setprecision(3) << joint0_command.q[0]
+    //     //           << " dq=" << joint0_command.dq[0]
+    //     //           << " tau=" << joint0_command.tau[0];
+    //     // if (!sent.success) {
+    //     //     std::cout << " (send failed: " << sent.msg << ")";
+    //     // }
+
+    //     const auto state = hand.readState();
+    //     if (state.success) {
+    //         if (state.value.has_left)  { printState("L", state.value.left); }
+    //         if (state.value.has_right) { printState("R", state.value.right); }
+    //     } else {
+    //         std::cout << "  read failed: " << state.msg;
+    //     }
+    //     std::cout << std::endl;
     }
 
     // --- 4. disconnect ------------------------------------------------------

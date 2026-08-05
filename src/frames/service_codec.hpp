@@ -25,6 +25,24 @@ inline void fillSlots(ServiceData& sd, int16_t d0, int16_t d1, int16_t d2)
 
 constexpr int16_t kIgnore = static_cast<int16_t>(kIgnoreWord);
 
+// The service word carries the direction in bit 15 (1 = write, 0 = read) and
+// the cmd id in bits 14:8, in both directions; the low byte is reserved.
+inline int16_t cmdWord(uint8_t id, bool write)
+{
+    const auto high = static_cast<uint16_t>((write ? 0x80u : 0x00u) | (id & 0x7Fu));
+    return static_cast<int16_t>(high << 8);
+}
+
+inline uint8_t cmdId(int16_t cmd)
+{
+    return static_cast<uint8_t>((static_cast<uint16_t>(cmd) >> 8) & 0x7Fu);
+}
+
+inline bool cmdIsWrite(int16_t cmd)
+{
+    return (static_cast<uint16_t>(cmd) & 0x8000u) != 0;
+}
+
 inline uint16_t word(const ServiceData& sd, std::size_t joint, std::size_t pos)
 {
     return static_cast<uint16_t>(sd.data[joint * 3 + pos]);
@@ -34,7 +52,7 @@ inline uint16_t word(const ServiceData& sd, std::size_t joint, std::size_t pos)
 inline ServiceData encodeComm(service::ComCmd cmd)
 {
     ServiceData sd{};
-    sd.cmd = 4;
+    sd.cmd = cmdWord(4, true);
     fillSlots(sd, static_cast<int16_t>(cmd), kIgnore, kIgnore);
     return sd;
 }
@@ -43,7 +61,7 @@ inline ServiceData encodeComm(service::ComCmd cmd)
 inline ServiceData encodeMode(service::LoopMode mode, bool enable)
 {
     ServiceData sd{};
-    sd.cmd = 11;
+    sd.cmd = cmdWord(11, true);
     const auto mode_word = static_cast<int16_t>(
         static_cast<uint16_t>(mode) | (enable ? 1u << 8 : 0u));
     fillSlots(sd, mode_word, kIgnore, kIgnore);
@@ -52,7 +70,7 @@ inline ServiceData encodeMode(service::LoopMode mode, bool enable)
 
 inline bool decodeMode(const ServiceData& sd, service::ModeStatusArray& out)
 {
-    if (sd.cmd != 11) {
+    if (cmdId(sd.cmd) != 11) {
         return false;
     }
     for (std::size_t j = 0; j < kNumJoints; ++j) {
@@ -68,13 +86,13 @@ inline bool decodeMode(const ServiceData& sd, service::ModeStatusArray& out)
 inline ServiceData encodeMcQuery()
 {
     ServiceData sd{};
-    sd.cmd = 12;
+    sd.cmd = cmdWord(12, false);
     return sd;
 }
 
 inline bool decodeMc(const ServiceData& sd, service::McStatusArray& out)
 {
-    if (sd.cmd != 12) {
+    if (cmdId(sd.cmd) != 12) {
         return false;
     }
     for (std::size_t j = 0; j < kNumJoints; ++j) {
@@ -89,14 +107,14 @@ inline bool decodeMc(const ServiceData& sd, service::McStatusArray& out)
 inline ServiceData encodeGains(float kp, float kd)
 {
     ServiceData sd{};
-    sd.cmd = 14;
+    sd.cmd = cmdWord(14, true);
     fillSlots(sd, toFixed(kp, kGainScale), toFixed(kd, kGainScale), kIgnore);
     return sd;
 }
 
 inline bool decodeGains(const ServiceData& sd, service::JointGainsArray& out)
 {
-    if (sd.cmd != 14) {
+    if (cmdId(sd.cmd) != 14) {
         return false;
     }
     for (std::size_t j = 0; j < kNumJoints; ++j) {

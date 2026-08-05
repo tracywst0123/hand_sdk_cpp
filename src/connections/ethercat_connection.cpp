@@ -77,14 +77,17 @@ std::string EthercatConnection::connect()
     // 0x1C32/0x1C33 are writable (notes.md, "DC-Synchron bring-up").
     if (config_.dc.enabled && config_.dc.write_sync_type) {
         for (int i = 1; i <= context_.slavecount; ++i) {
-            const bool is_hand =
-                std::strcmp(context_.slavelist[i].name, config_.left_hand_name.c_str()) == 0 ||
-                std::strcmp(context_.slavelist[i].name, config_.right_hand_name.c_str()) == 0;
-            if (!is_hand) {
+            if (!isHandSlave(i)) {
                 continue;
             }
             writeSyncType(i, 0x1C32, config_.dc.out_sync_type);
             writeSyncType(i, 0x1C33, config_.dc.in_sync_type);
+        }
+    }
+
+    for (int i = 1; i <= context_.slavecount; ++i) {
+        if (isHandSlave(i)) {
+            fixInputSmStart(i);
         }
     }
 
@@ -426,6 +429,30 @@ void EthercatConnection::writeSyncType(int slave_id, uint16_t index, uint16_t sy
                   << (readback == sync_type ? " (as requested)" : " (NOT as requested)")
                   << std::endl;
     }
+}
+
+bool EthercatConnection::isHandSlave(int slave_id) const
+{
+    const char* name = context_.slavelist[slave_id].name;
+    return std::strcmp(name, config_.left_hand_name.c_str()) == 0 ||
+           std::strcmp(name, config_.right_hand_name.c_str()) == 0;
+}
+
+void EthercatConnection::fixInputSmStart(int slave_id)
+{
+    // Some units ship an EEPROM that puts SM3 at 0x1400. Both SMs are 3-buffered,
+    // so the outputs at 0x1100 reserve 3 x 260 B up to 0x140B and SM3 lands inside
+    // them; the ESC then refuses PREOP -> SAFEOP with AL 0x001D "invalid output
+    // configuration". kSmInAddr is the ESI value and leaves no overlap.
+    const uint16_t eeprom_start = etohs(context_.slavelist[slave_id].SM[3].StartAddr);
+    if (eeprom_start == kSmInAddr) {
+        return;
+    }
+
+    std::clog << "[EtherCAT]   slave " << slave_id << " EEPROM puts SM3 at 0x"
+              << std::hex << eeprom_start << ", overlapping SM2; programming 0x"
+              << kSmInAddr << std::dec << " instead" << std::endl;
+    context_.slavelist[slave_id].SM[3].StartAddr = htoes(kSmInAddr);
 }
 
 SyncDiagnostics EthercatConnection::syncDiagnostics(int slave_id)

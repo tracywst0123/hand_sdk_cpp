@@ -76,6 +76,13 @@ private:
     // PREOP only; failures are logged, not fatal.
     void writeSyncType(int slave_id, uint16_t index, uint16_t sync_type);
 
+    // True if the slave's name matches the configured left or right hand.
+    bool isHandSlave(int slave_id) const;
+
+    // Force SM3 to the ESI start address before SOEM programs the SyncManagers.
+    // Between ecx_config_init() and ecx_config_map_group() only.
+    void fixInputSmStart(int slave_id);
+
     // --- Direct SM access (workaround for swapped 0x1C00 / FMMUs) -----------
     // The slaves describe their SM directions backwards over CoE, so LRW via
     // FMMUs is mis-routed; we address the ESC SyncManager regions directly.

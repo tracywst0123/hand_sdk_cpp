@@ -6,6 +6,9 @@
 
 #include <chrono>
 #include <exception>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
 #include <thread>
 #include <utility>
 
@@ -36,6 +39,27 @@ Result<void> checkHand(CyclicTask& task, service::Hand hand)
     return {true, {}};
 }
 
+// Raw service block as it goes on / comes off the wire: cmd word then the 63
+// payload words, 12 per line (4 joints).
+void dumpService(const char* tag, const frames::pdo::ServiceData& sd)
+{
+    std::ostringstream oss;
+    oss << "[service] " << tag << " cmd=0x" << std::hex << std::setw(4) << std::setfill('0')
+        << static_cast<uint16_t>(sd.cmd) << std::dec
+        << " (" << (frames::pdo::cmdIsWrite(sd.cmd) ? 'w' : 'r')
+        << " id " << static_cast<int>(frames::pdo::cmdId(sd.cmd)) << ")";
+
+    for (std::size_t i = 0; i < frames::pdo::kJointWords; ++i) {
+        if (i % 12 == 0) {
+            oss << "\n  j" << std::setw(2) << std::setfill('0') << std::dec << (i / 3) << ": ";
+        }
+        oss << ' ' << std::hex << std::setw(4) << std::setfill('0')
+            << static_cast<uint16_t>(sd.data[i]);
+    }
+
+    std::clog << oss.str() << std::dec << std::endl;
+}
+
 // One service round-trip: post the ticket, then poll the reply holder until
 // the cyclic thread captures a reply with our id. Caller holds service_mutex_
 // and has checked hand presence.
@@ -49,6 +73,7 @@ Result<frames::pdo::ServiceData> runService(CyclicTask& task,
     ticket.left    = hand == service::Hand::kLeft;
     ticket.right   = hand == service::Hand::kRight;
     ticket.request = request;
+    dumpService(ticket.left ? "L request" : "R request", request);
     task.serviceRequests().write(ticket);
 
     const auto deadline = std::chrono::steady_clock::now() + kServiceTimeout;
@@ -60,9 +85,11 @@ Result<frames::pdo::ServiceData> runService(CyclicTask& task,
         if (task.serviceReplies().tryRead(reply, kUserReadAttempts) != 0 &&
             reply.id == id) {
             if (ticket.left && reply.has_left) {
+                dumpService("L reply  ", reply.left);
                 return {true, "OK", reply.left};
             }
             if (ticket.right && reply.has_right) {
+                dumpService("R reply  ", reply.right);
                 return {true, "OK", reply.right};
             }
             return {false, "no reply from the targeted hand"};
@@ -151,7 +178,7 @@ Result<void> Api::serviceComm(service::Hand hand, service::ComCmd cmd)
         return {false, raw.msg};
     }
     // Write-only service: the reply carries no meaningful payload.
-    return {true, "OK"};
+    return {true, raw.msg};
 }
 
 Result<service::ModeStatusArray> Api::serviceMode(service::Hand hand,
@@ -173,7 +200,7 @@ Result<service::ModeStatusArray> Api::serviceMode(service::Hand hand,
     service::ModeStatusArray out{};
     if (!frames::pdo::decodeMode(raw.value, out)) {
         return {false, "reply cmd mismatch (expected 11, got " +
-                           std::to_string(raw.value.cmd) + ")"};
+                           std::to_string(frames::pdo::cmdId(raw.value.cmd)) + ")"};
     }
     return {true, "OK", out};
 }
@@ -195,7 +222,7 @@ Result<service::McStatusArray> Api::serviceMcState(service::Hand hand)
     service::McStatusArray out{};
     if (!frames::pdo::decodeMc(raw.value, out)) {
         return {false, "reply cmd mismatch (expected 12, got " +
-                           std::to_string(raw.value.cmd) + ")"};
+                           std::to_string(frames::pdo::cmdId(raw.value.cmd)) + ")"};
     }
     return {true, "OK", out};
 }
@@ -218,7 +245,7 @@ Result<service::JointGainsArray> Api::serviceGains(service::Hand hand,
     service::JointGainsArray out{};
     if (!frames::pdo::decodeGains(raw.value, out)) {
         return {false, "reply cmd mismatch (expected 14, got " +
-                           std::to_string(raw.value.cmd) + ")"};
+                           std::to_string(frames::pdo::cmdId(raw.value.cmd)) + ")"};
     }
     return {true, "OK", out};
 }
