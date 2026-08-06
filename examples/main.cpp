@@ -42,8 +42,8 @@ void onSignal(int) { g_run = false; }
 
 void printState(const char* tag, const hand_sdk::frames::HandState& s)
 {
-    std::cout << "  " << tag << " joint0 q=" << std::fixed << std::setprecision(3)
-              << s.q[0] << " dq=" << s.dq[0] << " tau=" << s.tau[0]
+    std::cout << "  " << tag << " joint1 q=" << std::fixed << std::setprecision(3)
+              << s.q[1] << " dq=" << s.dq[1] << " tau=" << s.tau[1]
               << "  errors=0x" << std::hex << std::setw(8) << std::setfill('0') << s.error_bits
               << " (Error_L 0x" << std::setw(4) << (s.error_bits & 0xFFFFu)
               << " Error_H 0x" << std::setw(4) << (s.error_bits >> 16) << ")"
@@ -140,68 +140,57 @@ int main()
               << " h, Ctrl-C to stop early\n\n";
 
     // --- 2. bring-up, one service call per second ----------------------------
-    // std::this_thread::sleep_for(1s);
-    // if (connected.value.has_left && !bringUp(hand, "L", Hand::kLeft)) {
-    //     std::cout << "  L bring-up aborted\n";
-    // }
-    // if (connected.value.has_right && !bringUp(hand, "R", Hand::kRight)) {
-    //     std::cout << "  R bring-up aborted\n";
-    // }
-    // std::cout << "\n";
+    std::this_thread::sleep_for(1s);
+    if (connected.value.has_left && !bringUp(hand, "L", Hand::kLeft)) {
+        std::cout << "  L bring-up aborted\n";
+    }
+    std::this_thread::sleep_for(1s);
+    if (connected.value.has_right && !bringUp(hand, "R", Hand::kRight)) {
+        std::cout << "  R bring-up aborted\n";
+    }
+    std::cout << "\n";
 
     // --- 3. loop: random joint-0 setpoint out, joint-0 state back ------------
-    // std::mt19937 rng{std::random_device{}()};
-    // std::uniform_real_distribution<float> q_dist{-kRandQ, kRandQ};
-    // std::uniform_real_distribution<float> dq_dist{-kRandDq, kRandDq};
-    // std::uniform_real_distribution<float> tau_dist{-kRandTau, kRandTau};
+    std::mt19937 rng{std::random_device{}()};
+    std::uniform_real_distribution<float> q_dist{-kRandQ, kRandQ};
+    std::uniform_real_distribution<float> dq_dist{-kRandDq, kRandDq};
+    std::uniform_real_distribution<float> tau_dist{-kRandTau, kRandTau};
 
-    // An iteration is longer than a second (bringUp sleeps between service
-    // calls), so the run length is a wall-clock deadline, not a loop count.
     const auto start    = std::chrono::steady_clock::now();
     const auto deadline = start + kRunTime;
 
     for (int sec = 0; g_run && std::chrono::steady_clock::now() < deadline; ++sec) {
         std::this_thread::sleep_for(1s);
-        const auto elapsed =
-            std::chrono::duration_cast<std::chrono::seconds>(
-                std::chrono::steady_clock::now() - start).count();
-        std::cout << "[iter " << sec << " | " << elapsed / 3600 << "h"
-                  << std::setw(2) << std::setfill('0') << (elapsed / 60) % 60 << "m"
-                  << std::setw(2) << (elapsed % 60) << "s]" << std::setfill(' ') << std::endl;
 
-        if (connected.value.has_left && !bringUp(hand, "L", Hand::kLeft)) {
-            std::cout << "  L bring-up aborted\n";
+        hand_sdk::frames::HandCommand joint0_command;
+        joint0_command.q[1]   = q_dist(rng);
+        joint0_command.dq[1]  = dq_dist(rng);
+        joint0_command.tau[1] = tau_dist(rng);
+
+        hand_sdk::frames::DualHandCommand command;
+        command.has_left  = connected.value.has_left;
+        command.left      = joint0_command;
+        command.has_right = connected.value.has_right;
+        command.right     = joint0_command;
+
+        const auto sent = hand.sendCommand(command);
+
+        std::cout << "[" << std::setw(3) << sec << "] write joint0 q="
+                  << std::fixed << std::setprecision(3) << joint0_command.q[1]
+                  << " dq=" << joint0_command.dq[1]
+                  << " tau=" << joint0_command.tau[1];
+        if (!sent.success) {
+            std::cout << " (send failed: " << sent.msg << ")";
         }
 
-    //     // hand_sdk::frames::HandCommand joint0_command;
-    //     // joint0_command.q[0]   = q_dist(rng);
-    //     // joint0_command.dq[0]  = dq_dist(rng);
-    //     // joint0_command.tau[0] = tau_dist(rng);
-
-    //     // hand_sdk::frames::DualHandCommand command;
-    //     // command.has_left  = connected.value.has_left;
-    //     // command.left      = joint0_command;
-    //     // command.has_right = connected.value.has_right;
-    //     // command.right     = joint0_command;
-
-    //     // const auto sent = hand.sendCommand(command);
-
-    //     // std::cout << "[" << std::setw(3) << sec << "] write joint0 q="
-    //     //           << std::fixed << std::setprecision(3) << joint0_command.q[0]
-    //     //           << " dq=" << joint0_command.dq[0]
-    //     //           << " tau=" << joint0_command.tau[0];
-    //     // if (!sent.success) {
-    //     //     std::cout << " (send failed: " << sent.msg << ")";
-    //     // }
-
-    //     const auto state = hand.readState();
-    //     if (state.success) {
-    //         if (state.value.has_left)  { printState("L", state.value.left); }
-    //         if (state.value.has_right) { printState("R", state.value.right); }
-    //     } else {
-    //         std::cout << "  read failed: " << state.msg;
-    //     }
-    //     std::cout << std::endl;
+        const auto state = hand.readState();
+        if (state.success) {
+            if (state.value.has_left)  { printState("L", state.value.left); }
+            if (state.value.has_right) { printState("R", state.value.right); }
+        } else {
+            std::cout << "  read failed: " << state.msg;
+        }
+        std::cout << std::endl;
     }
 
     // --- 4. disconnect ------------------------------------------------------

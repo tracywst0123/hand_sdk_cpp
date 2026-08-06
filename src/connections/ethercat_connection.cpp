@@ -133,17 +133,17 @@ std::string EthercatConnection::connect()
             if (id == -1) {
                 continue;
             }
-            // SYNC0 only — the device implements no SYNC1, so ecx_dcsync0(),
-            // never ecx_dcsync01().
-            ecx_dcsync0(&context_, static_cast<uint16_t>(id), TRUE,
-                        config_.dc.sync0_cycle_ns,
-                        config_.dc.sync0_shift_ns);
+            ecx_dcsync01(&context_, static_cast<uint16_t>(id), TRUE,
+                         config_.dc.sync0_cycle_ns,
+                         config_.dc.sync1_shift_from_sync0_ns,
+                         config_.dc.sync0_shift_ns);
         }
         dc_active_ = true;
 
-        std::clog << "[EtherCAT] DC-Synchron armed: SYNC0 every "
+        std::clog << "[EtherCAT] DC-Synchron armed: SYNC0/SYNC1 every "
                   << config_.dc.sync0_cycle_ns / 1000 << " us at +"
-                  << config_.dc.sync0_shift_ns / 1000 << " us"
+                  << config_.dc.sync0_shift_ns / 1000 << " us / +"
+                  << config_.dc.sync1_shift_from_sync0_ns / 1000 << " us"
                   << ", reference clock 0x" << std::hex << dc_ref_addr_ << std::dec
                   << std::endl;
         // SOEM schedules the first pulse ~100 ms out (its SyncDelay), so the
@@ -260,9 +260,10 @@ void EthercatConnection::disconnect()
             if (id == -1) {
                 continue;
             }
-            ecx_dcsync0(&context_, static_cast<uint16_t>(id), FALSE,
-                        config_.dc.sync0_cycle_ns,
-                        config_.dc.sync0_shift_ns);
+            ecx_dcsync01(&context_, static_cast<uint16_t>(id), FALSE,
+                         config_.dc.sync0_cycle_ns,
+                         config_.dc.sync1_shift_from_sync0_ns,
+                         config_.dc.sync0_shift_ns);
         }
         dc_active_ = false;
     }
