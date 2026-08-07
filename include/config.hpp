@@ -23,7 +23,7 @@ struct DcConfig
     int32_t sync0_shift_ns{100'000};
 
     // SYNC1 offset from the DC grid boundary (same cycle as SYNC0).
-    int32_t sync1_shift_from_sync0_ns{100'000};
+    int32_t sync1_shift_from_sync0_ns{200'000};
 
     // Target phase of the master task inside the DC cycle: after SYNC0, and
     // clear of sync0_shift_ns by more than the phase jitter.

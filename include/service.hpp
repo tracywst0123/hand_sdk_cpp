@@ -41,10 +41,11 @@ struct ModeStatus
 // --- cmd_id 12: motor-control state + fault code (read-only) -----------------
 enum class McState : uint8_t
 {
-    kInit    = 0,
-    kStandby = 1,
-    kActive  = 2,
-    kFault   = 3,
+    kNone    = 0,
+    kInit    = 1,
+    kStandby = 2,
+    kActive  = 3,
+    kFault   = 4,
 };
 
 // Bit flags in McStatus::fault_code.

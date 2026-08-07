@@ -86,7 +86,7 @@ inline bool decodeMode(const ServiceData& sd, service::ModeStatusArray& out)
 inline ServiceData encodeMcQuery()
 {
     ServiceData sd{};
-    sd.cmd = cmdWord(12, false);
+    sd.cmd = cmdWord(12, false);  // false is read-only encoding
     return sd;
 }
 
