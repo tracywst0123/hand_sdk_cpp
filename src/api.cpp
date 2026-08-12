@@ -209,6 +209,28 @@ Result<service::ModeStatusArray> Api::serviceMode(service::Hand hand,
     return {true, "OK", out};
 }
 
+Result<service::ModeStatusArray> Api::serviceModeQuery(service::Hand hand)
+{
+    std::unique_lock<std::mutex> lock(service_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        return {false, "another service call is in progress"};
+    }
+    if (auto err = checkHand(*task_, hand); !err.success) {
+        return {false, err.msg};
+    }
+    const auto raw = runService(*task_, hand, ++service_seq_,
+                                frames::pdo::encodeModeQuery());
+    if (!raw.success) {
+        return {false, raw.msg};
+    }
+    service::ModeStatusArray out{};
+    if (!frames::pdo::decodeMode(raw.value, out)) {
+        return {false, "reply cmd mismatch (expected 11, got " +
+                           std::to_string(frames::pdo::cmdId(raw.value.cmd)) + ")"};
+    }
+    return {true, "OK", out};
+}
+
 Result<service::McStatusArray> Api::serviceMcState(service::Hand hand)
 {
     std::unique_lock<std::mutex> lock(service_mutex_, std::try_to_lock);

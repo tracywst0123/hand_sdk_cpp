@@ -84,6 +84,16 @@ inline ServiceData encodeMode(service::LoopMode mode, bool enable,
     return sd;
 }
 
+// Ask what the mode/enable currently is without changing it: cmd 11 with the
+// ignore word in every payload slot, which is the device's own "no action".
+inline ServiceData encodeModeQuery()
+{
+    ServiceData sd{};
+    sd.cmd = cmdWord(11, true);
+    fillSlots(sd, kIgnore, kIgnore, kIgnore);
+    return sd;
+}
+
 inline bool decodeMode(const ServiceData& sd, service::ModeStatusArray& out)
 {
     if (cmdId(sd.cmd) != 11) {

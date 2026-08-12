@@ -108,6 +108,10 @@ public:
         bool enable,
         service::JointMask joints = service::JointMask::all());
 
+    // cmd 11 as a query: every payload slot carries the ignore word, so nothing
+    // is written and the reply reports the mode/enable each joint is already in.
+    Result<service::ModeStatusArray> serviceModeQuery(service::Hand hand);
+
     // cmd 12 (read-only): per-joint motor-control state and fault code.
     Result<service::McStatusArray> serviceMcState(service::Hand hand);
 
