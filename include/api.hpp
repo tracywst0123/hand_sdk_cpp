@@ -98,19 +98,26 @@ public:
     // success means the request was held for the full window.
     Result<void> serviceComm(service::Hand hand, service::ComCmd cmd);
 
-    // cmd 11: set closed-loop mode and control enable; returns the per-joint
+    // cmd 11: set closed-loop mode and control enable on the selected joints
+    // (default: all of them). Joints outside the mask get the device's "no
+    // action" word and keep whatever they were set to. Returns the per-joint
     // mode/enable the device reports back.
-    Result<service::ModeStatusArray> serviceMode(service::Hand hand,
-                                                 service::LoopMode mode,
-                                                 bool enable);
+    Result<service::ModeStatusArray> serviceMode(
+        service::Hand hand,
+        service::LoopMode mode,
+        bool enable,
+        service::JointMask joints = service::JointMask::all());
 
     // cmd 12 (read-only): per-joint motor-control state and fault code.
     Result<service::McStatusArray> serviceMcState(service::Hand hand);
 
-    // cmd 14: set force-mode position loop gains (applied to all joints);
-    // returns the per-joint gains the device reports back.
-    Result<service::JointGainsArray> serviceGains(service::Hand hand,
-                                                  float kp, float kd);
+    // cmd 14: set force-mode position loop gains on the selected joints
+    // (default: all), same masking rule as serviceMode. Returns the per-joint
+    // gains the device reports back.
+    Result<service::JointGainsArray> serviceGains(
+        service::Hand hand,
+        float kp, float kd,
+        service::JointMask joints = service::JointMask::all());
 
     // --- Status -------------------------------------------------------------
 

@@ -7,12 +7,15 @@
 
 // Encode typed service requests into wire ServiceData blocks and decode the
 // device's replies. Runs on user threads (called from Api), never in the
-// cyclic loop. The payload is 3 words per joint, data[joint*3 + 0..2]; write
-// requests broadcast the same values to all 21 joint slots, replies decode
-// per joint.
+// cyclic loop. The payload is 3 words per joint, data[joint*3 + 0..2]; a write
+// carries its values in the slots of the joints it targets and the ignore word
+// everywhere else, so a request can address one motor or all of them. Replies
+// decode per joint.
 
 namespace hand_sdk::frames::pdo
 {
+
+constexpr int16_t kIgnore = static_cast<int16_t>(kIgnoreWord);
 
 inline void fillSlots(ServiceData& sd, int16_t d0, int16_t d1, int16_t d2)
 {
@@ -23,7 +26,19 @@ inline void fillSlots(ServiceData& sd, int16_t d0, int16_t d1, int16_t d2)
     }
 }
 
-constexpr int16_t kIgnore = static_cast<int16_t>(kIgnoreWord);
+// Selected joints get the values, the rest get the ignore word -- which is the
+// device's own "this slot carries no action", so unselected motors keep
+// whatever they were set to.
+inline void fillSelected(ServiceData& sd, const service::JointMask& joints,
+                         int16_t d0, int16_t d1, int16_t d2)
+{
+    for (std::size_t j = 0; j < kNumJoints; ++j) {
+        const bool on = joints.test(j);
+        sd.data[j * 3 + 0] = on ? d0 : kIgnore;
+        sd.data[j * 3 + 1] = on ? d1 : kIgnore;
+        sd.data[j * 3 + 2] = on ? d2 : kIgnore;
+    }
+}
 
 // The service word carries the direction in bit 15 (1 = write, 0 = read) and
 // the cmd id in bits 14:8, in both directions; the low byte is reserved.
@@ -58,13 +73,14 @@ inline ServiceData encodeComm(service::ComCmd cmd)
 }
 
 // --- cmd_id 11: loop mode + control enable -----------------------------------
-inline ServiceData encodeMode(service::LoopMode mode, bool enable)
+inline ServiceData encodeMode(service::LoopMode mode, bool enable,
+                              const service::JointMask& joints)
 {
     ServiceData sd{};
     sd.cmd = cmdWord(11, true);
     const auto mode_word = static_cast<int16_t>(
         static_cast<uint16_t>(mode) | (enable ? 1u << 8 : 0u));
-    fillSlots(sd, mode_word, kIgnore, kIgnore);
+    fillSelected(sd, joints, mode_word, kIgnore, kIgnore);
     return sd;
 }
 
@@ -104,11 +120,11 @@ inline bool decodeMc(const ServiceData& sd, service::McStatusArray& out)
 }
 
 // --- cmd_id 14: force-mode position loop gains -------------------------------
-inline ServiceData encodeGains(float kp, float kd)
+inline ServiceData encodeGains(float kp, float kd, const service::JointMask& joints)
 {
     ServiceData sd{};
     sd.cmd = cmdWord(14, true);
-    fillSlots(sd, toFixed(kp, kGainScale), toFixed(kd, kGainScale), kIgnore);
+    fillSelected(sd, joints, toFixed(kp, kGainScale), toFixed(kd, kGainScale), kIgnore);
     return sd;
 }
 

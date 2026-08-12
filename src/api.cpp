@@ -183,17 +183,21 @@ Result<void> Api::serviceComm(service::Hand hand, service::ComCmd cmd)
 
 Result<service::ModeStatusArray> Api::serviceMode(service::Hand hand,
                                                   service::LoopMode mode,
-                                                  bool enable)
+                                                  bool enable,
+                                                  service::JointMask joints)
 {
     std::unique_lock<std::mutex> lock(service_mutex_, std::try_to_lock);
     if (!lock.owns_lock()) {
         return {false, "another service call is in progress"};
     }
+    if (!joints.any()) {
+        return {false, "no joints selected"};
+    }
     if (auto err = checkHand(*task_, hand); !err.success) {
         return {false, err.msg};
     }
     const auto raw = runService(*task_, hand, ++service_seq_,
-                                frames::pdo::encodeMode(mode, enable));
+                                frames::pdo::encodeMode(mode, enable, joints));
     if (!raw.success) {
         return {false, raw.msg};
     }
@@ -228,17 +232,21 @@ Result<service::McStatusArray> Api::serviceMcState(service::Hand hand)
 }
 
 Result<service::JointGainsArray> Api::serviceGains(service::Hand hand,
-                                                   float kp, float kd)
+                                                   float kp, float kd,
+                                                   service::JointMask joints)
 {
     std::unique_lock<std::mutex> lock(service_mutex_, std::try_to_lock);
     if (!lock.owns_lock()) {
         return {false, "another service call is in progress"};
     }
+    if (!joints.any()) {
+        return {false, "no joints selected"};
+    }
     if (auto err = checkHand(*task_, hand); !err.success) {
         return {false, err.msg};
     }
     const auto raw = runService(*task_, hand, ++service_seq_,
-                                frames::pdo::encodeGains(kp, kd));
+                                frames::pdo::encodeGains(kp, kd, joints));
     if (!raw.success) {
         return {false, raw.msg};
     }

@@ -16,6 +16,73 @@ namespace hand_sdk::service
 // Which hand a service call targets.
 enum class Hand { kLeft, kRight };
 
+// Which joints a service call targets.
+//
+// Addressing a subset is native to the protocol rather than something layered
+// on top: the payload is 3 words per joint and 0xFFFF means "no action", so a
+// masked request carries real values for the selected joints and the ignore
+// word for the rest. One motor can be re-tuned without disturbing the other
+// nineteen.
+//
+// Default-constructed is EMPTY. The service calls default to all(), which is
+// the broadcast they have always done.
+class JointMask
+{
+public:
+    static constexpr std::size_t kSize = frames::kNumJoints;
+
+    JointMask() = default;
+    explicit JointMask(uint32_t bits) : bits_(bits & kAllBits) {}
+    JointMask(std::initializer_list<std::size_t> joints)
+    {
+        for (const auto joint : joints) {
+            set(joint);
+        }
+    }
+
+    static JointMask all() { return JointMask(kAllBits); }
+    static JointMask none() { return JointMask(); }
+    static JointMask single(std::size_t joint) { return JointMask{joint}; }
+
+    JointMask& set(std::size_t joint, bool on = true)
+    {
+        if (joint < kSize) {
+            const uint32_t bit = 1u << joint;
+            bits_ = on ? (bits_ | bit) : (bits_ & ~bit);
+        }
+        return *this;
+    }
+
+    bool test(std::size_t joint) const
+    {
+        return joint < kSize && (bits_ & (1u << joint)) != 0;
+    }
+
+    bool any() const { return bits_ != 0; }
+    bool isAll() const { return bits_ == kAllBits; }
+
+    std::size_t count() const
+    {
+        std::size_t n = 0;
+        for (std::size_t i = 0; i < kSize; ++i) {
+            n += test(i) ? 1 : 0;
+        }
+        return n;
+    }
+
+    uint32_t bits() const { return bits_; }
+
+    JointMask& operator|=(const JointMask& other)
+    {
+        bits_ |= other.bits_;
+        return *this;
+    }
+
+private:
+    static constexpr uint32_t kAllBits = (1u << kSize) - 1u;
+    uint32_t bits_{0};
+};
+
 // --- cmd_id 4: communication control ----------------------------------------
 // Write-only; the device sends no meaningful reply, so the call reports
 // success once the request has been held for the full service window.
