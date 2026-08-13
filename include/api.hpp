@@ -110,9 +110,8 @@ public:
     // The reserved 21st slot is written like the others but never verified --
     // it has no motor behind it to echo (JointMask::active()).
 
-    // cmd 4: start/stop broadcast responses. Addressed to every joint slot, so
-    // all of them are held to the echoed command.
-    Result<void> serviceComm(service::Hand hand, service::ComCmd cmd);
+    // cmd 4: start/stop broadcast responses.
+    Result<service::ComStatusArray> serviceComm(service::Hand hand, service::ComCmd cmd);
 
     // cmd 11: set closed-loop mode and control enable on the selected joints
     // (default: all of them). Joints outside the mask get the device's "no

@@ -166,16 +166,13 @@ using ModeStatusArray = std::array<ModeStatus, frames::kNumJoints>;
 using McStatusArray   = std::array<McStatus, frames::kNumJoints>;
 using JointGainsArray = std::array<JointGains, frames::kNumJoints>;
 
-// cmd 4 has no decoded fields of its own -- the reply is the raw command word
-// each joint is now running, compared against the one that was sent.
 using ComStatusArray = std::array<uint16_t, frames::kNumJoints>;
 
-// --- write verification ------------------------------------------------------
-// Did this joint end up in the state it was told to be in? The write services
-// run exactly these over the joints their request addressed; they are here so a
-// caller can rebuild the same per-joint view from Result::value instead of
-// reading it out of the message, and so there is only one definition of what
-// "took it" means.
+
+inline bool took(uint16_t got, ComCmd cmd)
+{
+    return got == static_cast<uint16_t>(cmd);
+}
 
 inline bool took(const ModeStatus& got, LoopMode mode, bool enable)
 {

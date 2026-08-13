@@ -185,7 +185,7 @@ Result<void> Api::sendCommand(const frames::DualHandCommand& command)
     }
 }
 
-Result<void> Api::serviceComm(service::Hand hand, service::ComCmd cmd)
+Result<service::ComStatusArray> Api::serviceComm(service::Hand hand, service::ComCmd cmd)
 {
     std::unique_lock<std::mutex> lock(service_mutex_, std::try_to_lock);
     if (!lock.owns_lock()) {
@@ -211,9 +211,9 @@ Result<void> Api::serviceComm(service::Hand hand, service::ComCmd cmd)
     const auto want = static_cast<uint16_t>(cmd);
     const auto check = checkJoints(
         "comm", verifiable(service::JointMask::all()),
-        [&](std::size_t j) { return echo[j] == want; },
+        [&](std::size_t j) { return service::took(echo[j], cmd); },
         [&](std::size_t j) { return hexWord(echo[j]) + " (wanted " + hexWord(want) + ")"; });
-    return {check.ok, check.msg};
+    return {check.ok, check.msg, echo};
 }
 
 Result<service::ModeStatusArray> Api::serviceMode(service::Hand hand,
