@@ -357,10 +357,11 @@ All public types live in `hand_sdk`; see the headers for full documentation.
 | `readState()` | no | newest joint states + per-motor `error_bits` |
 | `sendCommand()` | no | joint position/velocity/torque commands |
 | `stateSequence()` / `commandSequence()` | no | detect fresh vs. repeated data |
-| `serviceComm()` | ~10 ms | start/stop broadcast responses |
-| `serviceMode()` | ~10 ms | set loop mode + control enable |
-| `serviceMcState()` | ~10 ms | per-joint state and fault codes |
-| `serviceGains()` | ~10 ms | set force-mode position loop gains |
+| `serviceComm()` | ~10 ms | **write** — start/stop broadcast responses |
+| `serviceMode()` | ~10 ms | **write** — set loop mode + control enable |
+| `serviceGains()` | ~10 ms | **write** — set force-mode position loop gains |
+| `serviceModeQuery()` | ~10 ms | read — the mode/enable each joint is already in |
+| `serviceMcState()` | ~10 ms | read — per-joint state and fault codes |
 | `cycleStats()`, `leftStatus()`, `leftDiagnostics()` | no | health and diagnostics |
 
 Every call returns `Result<T>` with `.success`, `.msg`, and `.value` — no
@@ -369,6 +370,43 @@ exceptions are thrown across the API boundary.
 Units are SI: positions in rad, velocities in rad/s, torques in N·m. Only one
 service call may be in flight at a time; a second concurrent call fails
 immediately with `"another service call is in progress"` rather than queueing.
+
+### Write services are verified per joint
+
+A read service succeeds once a reply block for that hand comes back carrying the
+right cmd id. There is nothing else to check — nothing was asked to change.
+
+A write service puts that same transport check first, then holds every joint the
+request addressed to what it was told. The device echoes its resulting state in
+the same slots the request was written into, so the reply says, per joint,
+whether it took:
+
+| Service | Checked against | How |
+|---|---|---|
+| `serviceComm()` | the `ComCmd` sent | exact — cmd 4 has no fields, the echo *is* the command |
+| `serviceMode()` | mode + enable | exact |
+| `serviceGains()` | kp / kd | within `Config::service_tolerance` |
+
+One addressed joint disagreeing makes `.success` false; `.msg` then names the
+joints on both sides with what came back, and `.value` still carries the decoded
+per-joint reply so a caller can render its own view rather than parse prose.
+`service::took()` is that same per-joint predicate, exposed so a caller counting
+joints and the SDK judging them cannot drift apart.
+
+```
+gains: 18/20 joints took it | pass: 0-17 | fail: j18 kp=0.0000 kd=0.0000 (wanted kp=3.0000 kd=3.0000 +-0.0005)
+```
+
+`Config::service_tolerance` defaults to `1/2048` — one fixed-point step. The
+application side is float and the electronics are fixed point at a scale of
+2048, so a request of `(1/2048 − δ)` is a number the electronics cannot hold and
+it runs `0` instead. One step of disagreement is that conversion; more than one
+step is the device substituting a value of its own.
+
+Joints outside a request's `JointMask` are sent the device's "no action" word,
+are never asked for anything, and so can neither pass nor fail. The reserved
+21st slot is written like the others but never verified — nothing is behind it to
+answer (`JointMask::active()` is the 20 that are).
 
 ---
 
