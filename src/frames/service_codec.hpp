@@ -63,13 +63,26 @@ inline uint16_t word(const ServiceData& sd, std::size_t joint, std::size_t pos)
     return static_cast<uint16_t>(sd.data[joint * 3 + pos]);
 }
 
-// --- cmd_id 4: communication control (write-only) ---------------------------
+// --- cmd_id 4: communication control -----------------------------------------
 inline ServiceData encodeComm(service::ComCmd cmd)
 {
     ServiceData sd{};
     sd.cmd = cmdWord(4, true);
     fillSlots(sd, static_cast<int16_t>(cmd), kIgnore, kIgnore);
     return sd;
+}
+
+// The command word each joint reports back, undecoded: cmd 4 has no fields, so
+// verification compares these against what was sent.
+inline bool decodeComm(const ServiceData& sd, service::ComStatusArray& out)
+{
+    if (cmdId(sd.cmd) != 4) {
+        return false;
+    }
+    for (std::size_t j = 0; j < kNumJoints; ++j) {
+        out[j] = word(sd, j, 0);
+    }
+    return true;
 }
 
 // --- cmd_id 11: loop mode + control enable -----------------------------------

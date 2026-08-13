@@ -6,7 +6,11 @@
 namespace hand_sdk::frames
 {
 
+// Joint slots on the wire. The last one is a reserved word with no motor
+// behind it: it is written like any other slot, because the frame has to carry
+// something there, but nothing ever answers for it.
 constexpr std::size_t kNumJoints = 21;
+constexpr std::size_t kNumActiveJoints = 20;
 
 // Engineering units: q in rad, dq in rad/s, tau in N*m. The wire carries
 // fixed-point int16 words; Api converts on the calling thread.

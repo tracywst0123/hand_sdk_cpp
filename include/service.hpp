@@ -3,6 +3,7 @@
 #include "messages.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 
 // Typed vocabulary for the PDO service channel. Each Api::service*() call is
@@ -40,7 +41,16 @@ public:
         }
     }
 
+    // Every slot the frame has, reserved one included -- what the service calls
+    // have always broadcast to, and what they still put on the wire.
     static JointMask all() { return JointMask(kAllBits); }
+
+    // Every slot with a motor behind it. The write services verify against this
+    // rather than all(): the reserved 21st slot is written like the others but
+    // has nothing there to echo, so holding it to an answer would fail every
+    // call for a joint that does not exist.
+    static JointMask active() { return JointMask(kActiveBits); }
+
     static JointMask none() { return JointMask(); }
     static JointMask single(std::size_t joint) { return JointMask{joint}; }
 
@@ -78,14 +88,22 @@ public:
         return *this;
     }
 
+    JointMask& operator&=(const JointMask& other)
+    {
+        bits_ &= other.bits_;
+        return *this;
+    }
+
 private:
     static constexpr uint32_t kAllBits = (1u << kSize) - 1u;
+    static constexpr uint32_t kActiveBits = (1u << frames::kNumActiveJoints) - 1u;
     uint32_t bits_{0};
 };
 
 // --- cmd_id 4: communication control ----------------------------------------
-// Write-only; the device sends no meaningful reply, so the call reports
-// success once the request has been held for the full service window.
+// The request is stacked into data0 of every joint slot, like every other
+// service. The reply is checked the same way the others are: each joint must
+// echo the command it was given.
 enum class ComCmd : uint16_t
 {
     kStopBroadcast  = 1,
@@ -147,5 +165,29 @@ struct JointGains
 using ModeStatusArray = std::array<ModeStatus, frames::kNumJoints>;
 using McStatusArray   = std::array<McStatus, frames::kNumJoints>;
 using JointGainsArray = std::array<JointGains, frames::kNumJoints>;
+
+// cmd 4 has no decoded fields of its own -- the reply is the raw command word
+// each joint is now running, compared against the one that was sent.
+using ComStatusArray = std::array<uint16_t, frames::kNumJoints>;
+
+// --- write verification ------------------------------------------------------
+// Did this joint end up in the state it was told to be in? The write services
+// run exactly these over the joints their request addressed; they are here so a
+// caller can rebuild the same per-joint view from Result::value instead of
+// reading it out of the message, and so there is only one definition of what
+// "took it" means.
+
+inline bool took(const ModeStatus& got, LoopMode mode, bool enable)
+{
+    return got.mode == mode && got.enabled == enable;
+}
+
+// Gains cross a float-to-fixed-point boundary (scale 2048), so this one is a
+// tolerance rather than equality: one step of 1/2048 is the conversion, more is
+// the device choosing its own value. Pass Config::service_tolerance.
+inline bool took(const JointGains& got, float kp, float kd, float tolerance)
+{
+    return std::fabs(got.kp - kp) <= tolerance && std::fabs(got.kd - kd) <= tolerance;
+}
 
 } // namespace hand_sdk::service

@@ -3,19 +3,38 @@
 #include "cyclic_task.hpp"
 #include "frames/pdo_codec.hpp"
 #include "frames/service_codec.hpp"
+#include "service_report.hpp"
 
 #include <chrono>
+#include <cmath>
 #include <exception>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace hand_sdk
 {
 namespace
 {
+// Step two of the write funnel and its wording; see service_report.hpp.
+using service::report::checkJoints;
+using service::report::hexWord;
+using service::report::number;
+
+// Which of the joints a request addressed can be held to an answer: the ones
+// with a motor behind them. The reserved 21st slot goes out with the rest --
+// the frame has to carry something there -- but nothing echoes for it, so it is
+// dropped before the reply is checked rather than failing every write.
+service::JointMask verifiable(service::JointMask joints)
+{
+    joints &= service::JointMask::active();
+    return joints;
+}
+
 // User threads are not real-time, so they can afford to keep retrying a torn
 // read. The cyclic thread uses a much smaller limit; see Holder::tryRead().
 constexpr int kUserReadAttempts = 64;
@@ -100,7 +119,10 @@ Result<frames::pdo::ServiceData> runService(CyclicTask& task,
 }
 } // namespace
 
-Api::Api(Config config) : task_(std::make_unique<CyclicTask>(std::move(config))) {}
+Api::Api(Config config)
+    : config_(config), task_(std::make_unique<CyclicTask>(std::move(config)))
+{
+}
 
 // Out of line: CyclicTask is incomplete at the point of the class definition.
 Api::~Api() = default;
@@ -177,8 +199,21 @@ Result<void> Api::serviceComm(service::Hand hand, service::ComCmd cmd)
     if (!raw.success) {
         return {false, raw.msg};
     }
-    // Write-only service: the reply carries no meaningful payload.
-    return {true, raw.msg};
+
+    service::ComStatusArray echo{};
+    if (!frames::pdo::decodeComm(raw.value, echo)) {
+        return {false, "reply cmd mismatch (expected 4, got " +
+                           std::to_string(frames::pdo::cmdId(raw.value.cmd)) + ")"};
+    }
+
+    // No mask on this one: encodeComm stacks the command into every joint slot,
+    // so every motor was addressed and every motor is held to it.
+    const auto want = static_cast<uint16_t>(cmd);
+    const auto check = checkJoints(
+        "comm", verifiable(service::JointMask::all()),
+        [&](std::size_t j) { return echo[j] == want; },
+        [&](std::size_t j) { return hexWord(echo[j]) + " (wanted " + hexWord(want) + ")"; });
+    return {check.ok, check.msg};
 }
 
 Result<service::ModeStatusArray> Api::serviceMode(service::Hand hand,
@@ -206,7 +241,18 @@ Result<service::ModeStatusArray> Api::serviceMode(service::Hand hand,
         return {false, "reply cmd mismatch (expected 11, got " +
                            std::to_string(frames::pdo::cmdId(raw.value.cmd)) + ")"};
     }
-    return {true, "OK", out};
+
+    // Mode and enable are enums: a joint either came back in the state it was
+    // told to be in or it did not.
+    const auto check = checkJoints(
+        "mode", verifiable(joints),
+        [&](std::size_t j) { return service::took(out[j], mode, enable); },
+        [&](std::size_t j) {
+            return "mode=" + std::to_string(static_cast<int>(out[j].mode)) +
+                   " en=" + (out[j].enabled ? "1" : "0") + " (wanted mode=" +
+                   std::to_string(static_cast<int>(mode)) + " en=" + (enable ? "1" : "0") + ")";
+        });
+    return {check.ok, check.msg, out};
 }
 
 Result<service::ModeStatusArray> Api::serviceModeQuery(service::Hand hand)
@@ -277,7 +323,18 @@ Result<service::JointGainsArray> Api::serviceGains(service::Hand hand,
         return {false, "reply cmd mismatch (expected 14, got " +
                            std::to_string(frames::pdo::cmdId(raw.value.cmd)) + ")"};
     }
-    return {true, "OK", out};
+
+    // The only numeric write: the readback is quantised, so it is checked
+    // against a tolerance rather than for equality.
+    const float tol = config_.service_tolerance;
+    const auto check = checkJoints(
+        "gains", verifiable(joints),
+        [&](std::size_t j) { return service::took(out[j], kp, kd, tol); },
+        [&](std::size_t j) {
+            return "kp=" + number(out[j].kp) + " kd=" + number(out[j].kd) + " (wanted kp=" +
+                   number(kp) + " kd=" + number(kd) + " +-" + number(tol) + ")";
+        });
+    return {check.ok, check.msg, out};
 }
 
 uint64_t Api::stateSequence() const

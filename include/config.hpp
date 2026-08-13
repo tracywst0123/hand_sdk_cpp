@@ -49,6 +49,19 @@ struct Config
     // SCHED_FIFO priority for the cyclic thread. Applied to that thread only —
     // user threads stay at normal priority and remain preemptible by it.
     int rt_priority{80};
+
+    // How far a numeric write service's readback may sit from what was asked
+    // before the joint counts as having refused it.
+    //
+    // Gains (cmd 14) are the only numeric write. The application side is float
+    // and the electronics are fixed point, joined by a scale of 2048, so one
+    // step is 1/2048 and that is the whole error budget: a request of
+    // (1/2048 - delta) is a number the electronics cannot hold, and it runs 0
+    // instead -- off by very nearly a full step through nobody's fault. One
+    // step of disagreement is therefore the conversion; more than one step is
+    // the device substituting a value of its own, which is what this is here to
+    // catch. Enum writes -- comm and mode -- are matched exactly and ignore it.
+    float service_tolerance{1.0f / 2048.0f};  // ~0.000488
 };
 
 } // namespace hand_sdk

@@ -93,15 +93,31 @@ public:
     // owns the channel for one 10-cycle window (~10 ms at 1 kHz). No queueing:
     // a call made while another is in flight fails immediately with
     // "another service call is in progress". See include/service.hpp for types.
+    //
+    // The two read services (serviceModeQuery, serviceMcState) succeed once a
+    // reply block for the hand comes back with the right cmd id -- there is
+    // nothing else to check, since nothing was asked to change.
+    //
+    // The three write services (serviceComm, serviceMode, serviceGains) put
+    // that same transport check first and then verify the reply per joint:
+    // every joint the request addressed must echo what it was told, exactly for
+    // the enum writes and within Config::service_tolerance for gains. One
+    // addressed joint disagreeing fails the call, and msg then names the joints
+    // on each side with what came back. The decoded reply is still returned in
+    // value, so a caller that wants to render its own per-joint view does not
+    // have to read the message.
+    //
+    // The reserved 21st slot is written like the others but never verified --
+    // it has no motor behind it to echo (JointMask::active()).
 
-    // cmd 4: start/stop broadcast responses. Write-only on the device, so
-    // success means the request was held for the full window.
+    // cmd 4: start/stop broadcast responses. Addressed to every joint slot, so
+    // all of them are held to the echoed command.
     Result<void> serviceComm(service::Hand hand, service::ComCmd cmd);
 
     // cmd 11: set closed-loop mode and control enable on the selected joints
     // (default: all of them). Joints outside the mask get the device's "no
-    // action" word and keep whatever they were set to. Returns the per-joint
-    // mode/enable the device reports back.
+    // action" word, keep whatever they were set to, and are not verified.
+    // Returns the per-joint mode/enable the device reports back.
     Result<service::ModeStatusArray> serviceMode(
         service::Hand hand,
         service::LoopMode mode,
@@ -116,8 +132,10 @@ public:
     Result<service::McStatusArray> serviceMcState(service::Hand hand);
 
     // cmd 14: set force-mode position loop gains on the selected joints
-    // (default: all), same masking rule as serviceMode. Returns the per-joint
-    // gains the device reports back.
+    // (default: all), same masking rule as serviceMode. The only numeric write:
+    // its readback is quantised (s16en11), so an addressed joint passes when it
+    // lands within Config::service_tolerance of the request. Returns the
+    // per-joint gains the device reports back.
     Result<service::JointGainsArray> serviceGains(
         service::Hand hand,
         float kp, float kd,
@@ -140,6 +158,11 @@ public:
     const SlaveStatus& rightStatus() const;
 
 private:
+    // Kept because the write services verify their replies against it
+    // (Config::service_tolerance). Declared before task_, which the constructor
+    // moves the original into.
+    Config config_;
+
     std::unique_ptr<CyclicTask> task_;
 
     // Serializes service calls (one window in flight) and guards service_seq_.
