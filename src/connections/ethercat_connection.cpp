@@ -237,6 +237,7 @@ std::string EthercatConnection::connect()
     }
 
     connected_ = true;
+    last_exchange_ok_ = false;   // nothing exchanged yet this session
     captureStatus();
     return {};
 }
@@ -280,6 +281,7 @@ void EthercatConnection::disconnect()
     left_slave_id_  = -1;
     right_slave_id_ = -1;
     connected_ = false;
+    last_exchange_ok_ = false;
 }
 
 bool EthercatConnection::hasLeft() const
@@ -303,7 +305,8 @@ bool EthercatConnection::update()
     int expected = 0;
     if (left_slave_id_  != -1) expected += 2;
     if (right_slave_id_ != -1) expected += 2;
-    return expected > 0 && wkc >= expected;
+    last_exchange_ok_ = expected > 0 && wkc >= expected;
+    return last_exchange_ok_;
 }
 
 
@@ -336,6 +339,15 @@ int EthercatConnection::exchangeRaw()
 bool EthercatConnection::copyInputs(frames::pdo::DualReadPDO& raw)
 {
     if (!connected_) {
+        return false;
+    }
+
+    // A short working counter means at least one slave did not answer this
+    // cycle, so left_in_/right_in_ still hold the *previous* frame. Handing
+    // that back would publish a stale state and, worse, let a service window
+    // capture it as a reply -- which is how a lost frame turns into a
+    // well-formed reply of all zeros. Say nothing rather than something wrong.
+    if (!last_exchange_ok_) {
         return false;
     }
 

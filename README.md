@@ -360,8 +360,11 @@ All public types live in `hand_sdk`; see the headers for full documentation.
 | `serviceComm()` | ~10 ms | **write** — start/stop broadcast responses |
 | `serviceMode()` | ~10 ms | **write** — set loop mode + control enable |
 | `serviceGains()` | ~10 ms | **write** — set force-mode position loop gains |
+| `serviceZeroCalibrate()` | ~10 ms | **write** — start the position zero-point calibration |
 | `serviceModeQuery()` | ~10 ms | read — the mode/enable each joint is already in |
 | `serviceMcState()` | ~10 ms | read — per-joint state and fault codes |
+| `serviceGainsQuery()` | ~10 ms | read — the gains each joint is already running |
+| `serviceZeroCalibrateState()` | ~10 ms | read — per-joint zero-calibration state |
 | `cycleStats()`, `leftStatus()`, `leftDiagnostics()` | no | health and diagnostics |
 
 Every call returns `Result<T>` with `.success`, `.msg`, and `.value` — no
@@ -386,6 +389,7 @@ whether it took:
 | `serviceComm()` | the `ComCmd` sent | exact — cmd 4 has no fields, the echo *is* the command |
 | `serviceMode()` | mode + enable | exact |
 | `serviceGains()` | kp / kd | within `Config::service_tolerance` |
+| `serviceZeroCalibrate()` | — | not verified: the routine outlives the window, so nothing has an outcome to echo yet. Poll `serviceZeroCalibrateState()` for the result |
 
 One addressed joint disagreeing makes `.success` false; `.msg` then names the
 joints on both sides with what came back, and `.value` still carries the decoded

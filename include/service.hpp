@@ -110,6 +110,52 @@ enum class ComCmd : uint16_t
     kStartBroadcast = 2,
 };
 
+// --- cmd_id 10: position zero-point calibration ------------------------------
+// Payload per joint: d0 pos_zero_calibration (the request), d1
+// hall_backlash_abspos (unused by this SDK), d2 pos_zero_calibration_state
+// (what the device reports back). One register set, so the write call and the
+// read call share the cmd id -- the same split cmd 11 already has.
+
+// Low byte of pos_zero_calibration. The device clears the field to 0 itself
+// once the routine finishes, so kStart is a one-shot: it is never left latched
+// on the motor waiting to fire again.
+enum class ZeroCalCmd : uint8_t
+{
+    kNone  = 0x00,  // no meaning to the device; nothing starts
+    kStart = 0x01,  // begin calibrating
+};
+
+// High byte of pos_zero_calibration: which way the first rotation turns,
+// relative to the magnetic encoder's own direction. 0xFF is the only value
+// that means "opposite" -- every other value, kSameAsEncoder included, means
+// "same" -- so this is a two-valued setting the device spells with a byte.
+enum class ZeroCalDir : uint8_t
+{
+    kSameAsEncoder = 0x01,
+    kOpposite      = 0xFF,
+};
+
+// Low byte of pos_zero_calibration_state, read as a *signed* byte: the failure
+// code is -1, which arrives on the wire as 0xFF.
+enum class ZeroCalState : int8_t
+{
+    kFailed        = -1,
+    kNotCalibrated = 0,
+    kInProgress    = 1,
+    kSucceeded     = 2,
+};
+
+inline const char* stateName(ZeroCalState state)
+{
+    switch (state) {
+        case ZeroCalState::kFailed:        return "failed";
+        case ZeroCalState::kNotCalibrated: return "not calibrated";
+        case ZeroCalState::kInProgress:    return "calibrating";
+        case ZeroCalState::kSucceeded:     return "succeeded";
+    }
+    return "unknown";
+}
+
 // --- cmd_id 11: closed-loop mode + control enable ----------------------------
 enum class LoopMode : uint8_t
 {
@@ -165,6 +211,7 @@ struct JointGains
 using ModeStatusArray = std::array<ModeStatus, frames::kNumJoints>;
 using McStatusArray   = std::array<McStatus, frames::kNumJoints>;
 using JointGainsArray = std::array<JointGains, frames::kNumJoints>;
+using ZeroCalStateArray = std::array<ZeroCalState, frames::kNumJoints>;
 
 using ComStatusArray = std::array<uint16_t, frames::kNumJoints>;
 

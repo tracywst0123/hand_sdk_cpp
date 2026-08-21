@@ -5,6 +5,7 @@
 #include "frames/service_codec.hpp"
 #include "service_report.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <exception>
@@ -22,6 +23,7 @@ namespace
 {
 // Step two of the write funnel and its wording; see service_report.hpp.
 using service::report::checkJoints;
+using service::report::jointList;
 using service::report::hexWord;
 using service::report::number;
 
@@ -35,6 +37,19 @@ service::JointMask verifiable(service::JointMask joints)
     return joints;
 }
 
+// The joints a mask holds, in order, for the report helpers -- which speak in
+// index lists rather than bitmasks.
+std::vector<std::size_t> selected(const service::JointMask& joints)
+{
+    std::vector<std::size_t> out;
+    for (std::size_t j = 0; j < service::JointMask::kSize; ++j) {
+        if (joints.test(j)) {
+            out.push_back(j);
+        }
+    }
+    return out;
+}
+
 // User threads are not real-time, so they can afford to keep retrying a torn
 // read. The cyclic thread uses a much smaller limit; see Holder::tryRead().
 constexpr int kUserReadAttempts = 64;
@@ -43,6 +58,56 @@ constexpr int kUserReadAttempts = 64;
 // for a window already in flight plus bus hiccups.
 constexpr auto kServicePoll    = std::chrono::milliseconds(1);
 constexpr auto kServiceTimeout = std::chrono::milliseconds(100);
+
+// The zero-calibration message, grouped by state rather than listed per joint:
+// twenty joints usually sit in one or two of the four codes, and "succeeded:
+// 0-18 | calibrating: 19" says that in a line. Only the active joints are
+// counted -- the reserved slot has no motor to calibrate.
+std::string zeroCalSummary(const service::ZeroCalStateArray& states)
+{
+    using service::ZeroCalState;
+    static constexpr ZeroCalState kOrder[] = {
+        ZeroCalState::kSucceeded,
+        ZeroCalState::kInProgress,
+        ZeroCalState::kNotCalibrated,
+        ZeroCalState::kFailed,
+    };
+
+    std::string msg = "zero-cal";
+    std::vector<std::size_t> unknown;
+    for (std::size_t j = 0; j < frames::kNumActiveJoints; ++j) {
+        const bool listed = std::any_of(std::begin(kOrder), std::end(kOrder),
+                                        [&](ZeroCalState s) { return states[j] == s; });
+        if (!listed) {
+            unknown.push_back(j);
+        }
+    }
+
+    for (const auto state : kOrder) {
+        std::vector<std::size_t> joints;
+        for (std::size_t j = 0; j < frames::kNumActiveJoints; ++j) {
+            if (states[j] == state) {
+                joints.push_back(j);
+            }
+        }
+        if (!joints.empty()) {
+            msg += std::string(" | ") + service::stateName(state) + ": " +
+                   jointList(joints);
+        }
+    }
+
+    // A code the vendor table does not list is shown raw rather than folded
+    // into one of the four -- it is the device saying something we do not know
+    // how to read, which is worth seeing.
+    if (!unknown.empty()) {
+        msg += " | unknown:";
+        for (std::size_t i = 0; i < unknown.size(); ++i) {
+            msg += (i == 0 ? " j" : ", j") + std::to_string(unknown[i]) + "=" +
+                   std::to_string(static_cast<int>(states[unknown[i]]));
+        }
+    }
+    return msg;
+}
 
 Result<void> checkHand(CyclicTask& task, service::Hand hand)
 {
@@ -92,7 +157,13 @@ Result<frames::pdo::ServiceData> runService(CyclicTask& task,
     ticket.left    = hand == service::Hand::kLeft;
     ticket.right   = hand == service::Hand::kRight;
     ticket.request = request;
+    const char* tag = ticket.left ? "L" : "R";
     dumpService(ticket.left ? "L request" : "R request", request);
+
+    // Cycles lost before this call, so the failure paths below can say how many
+    // were lost *during* it -- which is what separates "the wire dropped our
+    // frames" from "the device said nothing".
+    const uint64_t failures_before = task.stats().exchange_failures;
     task.serviceRequests().write(ticket);
 
     const auto deadline = std::chrono::steady_clock::now() + kServiceTimeout;
@@ -111,10 +182,24 @@ Result<frames::pdo::ServiceData> runService(CyclicTask& task,
                 dumpService("R reply  ", reply.right);
                 return {true, "OK", reply.right};
             }
+            // The window opened and closed on our id, but not one of ticks 5..9
+            // produced a usable input frame -- every one of them had a short
+            // working counter.
+            std::clog << "[service] " << tag << " FAILED: window ran, nothing captured"
+                      << " (id " << id << ", "
+                      << (task.stats().exchange_failures - failures_before)
+                      << " exchanges lost during the window)" << std::endl;
             return {false, "no reply from the targeted hand"};
         }
         std::this_thread::sleep_for(kServicePoll);
     }
+    // No reply block carrying our id was ever published. The window is 10 cycles
+    // at 1 kHz and the timeout is 100 ms, so this is not the window being slow:
+    // it never opened, which means the cyclic thread never accepted the ticket.
+    std::clog << "[service] " << tag << " FAILED: timed out, no window ran"
+              << " (id " << id << ", "
+              << (task.stats().exchange_failures - failures_before)
+              << " exchanges lost while waiting)" << std::endl;
     return {false, "service reply timed out"};
 }
 } // namespace
@@ -214,6 +299,67 @@ Result<service::ComStatusArray> Api::serviceComm(service::Hand hand, service::Co
         [&](std::size_t j) { return service::took(echo[j], cmd); },
         [&](std::size_t j) { return hexWord(echo[j]) + " (wanted " + hexWord(want) + ")"; });
     return {check.ok, check.msg, echo};
+}
+
+Result<service::ZeroCalStateArray> Api::serviceZeroCalibrate(service::Hand hand,
+                                                             service::ZeroCalDir dir,
+                                                             service::JointMask joints)
+{
+    std::unique_lock<std::mutex> lock(service_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        return {false, "another service call is in progress"};
+    }
+    if (!joints.any()) {
+        return {false, "no joints selected"};
+    }
+    if (auto err = checkHand(*task_, hand); !err.success) {
+        return {false, err.msg};
+    }
+    const auto raw = runService(
+        *task_, hand, ++service_seq_,
+        frames::pdo::encodeZeroCal(service::ZeroCalCmd::kStart, dir, joints));
+    if (!raw.success) {
+        return {false, raw.msg};
+    }
+    service::ZeroCalStateArray out{};
+    if (!frames::pdo::decodeZeroCal(raw.value, out)) {
+        return {false, "reply cmd mismatch (expected 10, got " +
+                           std::to_string(frames::pdo::cmdId(raw.value.cmd)) + ")"};
+    }
+
+    // Deliberately no checkJoints() here. The other writes take effect inside
+    // the window and echo their new state in it; this one kicks off a physical
+    // routine that runs for seconds, so within the window there is nothing to
+    // echo but "calibrating" at best. The reply landing on cmd 10 is the whole
+    // verification -- the outcome is read later, with serviceZeroCalibrateState.
+    return {true,
+            "zero-cal requested on joints " + jointList(selected(verifiable(joints))) +
+                " | " + zeroCalSummary(out),
+            out};
+}
+
+Result<service::ZeroCalStateArray> Api::serviceZeroCalibrateState(service::Hand hand)
+{
+    std::unique_lock<std::mutex> lock(service_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        return {false, "another service call is in progress"};
+    }
+    if (auto err = checkHand(*task_, hand); !err.success) {
+        return {false, err.msg};
+    }
+    const auto raw = runService(*task_, hand, ++service_seq_,
+                                frames::pdo::encodeZeroCalQuery());
+    if (!raw.success) {
+        return {false, raw.msg};
+    }
+    service::ZeroCalStateArray out{};
+    if (!frames::pdo::decodeZeroCal(raw.value, out)) {
+        return {false, "reply cmd mismatch (expected 10, got " +
+                           std::to_string(frames::pdo::cmdId(raw.value.cmd)) + ")"};
+    }
+    // Nothing was asked to change, so the reply arriving is the success. What
+    // the joints are actually reporting goes in the message.
+    return {true, zeroCalSummary(out), out};
 }
 
 Result<service::ModeStatusArray> Api::serviceMode(service::Hand hand,
@@ -335,6 +481,28 @@ Result<service::JointGainsArray> Api::serviceGains(service::Hand hand,
                    number(kp) + " kd=" + number(kd) + " +-" + number(tol) + ")";
         });
     return {check.ok, check.msg, out};
+}
+
+Result<service::JointGainsArray> Api::serviceGainsQuery(service::Hand hand)
+{
+    std::unique_lock<std::mutex> lock(service_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        return {false, "another service call is in progress"};
+    }
+    if (auto err = checkHand(*task_, hand); !err.success) {
+        return {false, err.msg};
+    }
+    const auto raw = runService(*task_, hand, ++service_seq_,
+                                frames::pdo::encodeGainsQuery());
+    if (!raw.success) {
+        return {false, raw.msg};
+    }
+    service::JointGainsArray out{};
+    if (!frames::pdo::decodeGains(raw.value, out)) {
+        return {false, "reply cmd mismatch (expected 14, got " +
+                           std::to_string(frames::pdo::cmdId(raw.value.cmd)) + ")"};
+    }
+    return {true, "OK", out};
 }
 
 uint64_t Api::stateSequence() const

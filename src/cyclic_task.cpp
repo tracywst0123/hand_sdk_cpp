@@ -149,12 +149,15 @@ void CyclicTask::run()
             states_.write(state);
         }
 
-        // Record the reply over the 7th..9th frames of the window (the slaves
-        // need several frames to publish it; overwriting keeps the newest good
-        // copy, so a missed 9th frame still leaves the 8th). The final copy is
-        // published once, when the window closes.
+        // Record the reply over ticks 5..9 of the window. Tick 0 is the frame
+        // that first carries the request, so the device has had five frames to
+        // gather its answer before the first capture, and the last capture is
+        // the final frame of the window -- the newest answer the window can
+        // hold. Overwriting keeps the latest good copy, so a lost frame in the
+        // middle still leaves an earlier one. The final copy is published once,
+        // when the window closes.
         if (window_open) {
-            if (inputs_ok && service_cycle >= 6 && service_cycle <= 8) {
+            if (inputs_ok && service_cycle >= 5 && service_cycle <= 9) {
                 if (ticket.left && state.has_left) {
                     reply.has_left = true;
                     reply.left     = state.left.service_data;

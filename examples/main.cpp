@@ -1,19 +1,28 @@
-// Minimal user-layer example.
+// Scripted bench sequence — read-only apart from two zero-calibrations.
 //
 //   1. connect
-//   2. bring-up, one service call per second: start broadcast, enable
-//      force-control, verify the state machine, set gains (3.0, 3.0)
-//   3. once a second: write a random q/dq/tau setpoint to joint 0 and read
-//      that joint's q/dq/tau back, plus the per-motor error bits
-//   4. disconnect
+//   2. wait 5 s
+//   3. read mc_state
+//   4. wait 5 s
+//   5. read mc_state again
+//   6. wait 5 s
+//   7. start zero-calibration on the FIRST joint (j0)
+//   8. wait 5 s
+//   9. read every joint's calibration status
+//  10. start zero-calibration on the SECOND joint (j1)
+//  11. disconnect
 //
-// Only hand_sdk::Api is used here. The bus runs at 1 kHz on its own real-time
-// thread the whole time; this loop just reads states and makes an occasional
-// service round-trip.
+// SAFETY: this program never enables control and never sends a joint command.
+// It does not call serviceComm/serviceMode/serviceGains, so no motor is ever
+// commanded to hold a position. The two zero-calibration calls DO drive their
+// motor: the routine turns the joint looking for its stop. Keep j0 and j1 free
+// to move.
 //
-// SAFETY: step 2 ENABLES CONTROL. Joints 1..20 are streamed zeros and will
-// actively hold position 0 with the gains set below; joint 0 additionally gets
-// a new random setpoint every second. Keep the hands free to move.
+// Steps 3 and 5 are the same query on purpose — running it twice, five seconds
+// apart, is how an intermittent service channel shows itself. A cycle whose
+// working counter came up short is reported as a failure rather than as a reply
+// of zeros, so "no reply from the targeted hand" here means frames are being
+// lost on the wire, not that the device answered with nothing.
 
 #include <hand_sdk.hpp>
 
@@ -22,94 +31,135 @@
 #include <csignal>
 #include <iomanip>
 #include <iostream>
-#include <random>
 #include <thread>
 
 namespace {
 
 using namespace std::chrono_literals;
 using hand_sdk::service::Hand;
+using hand_sdk::service::McState;
+using hand_sdk::service::ZeroCalState;
 
-constexpr auto kRunTime = 15h;
+constexpr auto kStep = 5s;
 
-// Deliberately small: joint 0 is driven to these setpoints for real.
-constexpr float kRandQ   = 0.20f;  // [rad]
-constexpr float kRandDq  = 0.50f;  // [rad/s]
-constexpr float kRandTau = 0.05f;  // [N*m]
+// The two joints this run calibrates, in order.
+constexpr std::size_t kFirstJoint  = 0;
+constexpr std::size_t kSecondJoint = 1;
 
 std::atomic<bool> g_run{true};
 void onSignal(int) { g_run = false; }
 
-void printState(const char* tag, const hand_sdk::frames::HandState& s)
+// Sleep in 100 ms slices so Ctrl-C lands inside a wait instead of after it.
+// Returns false if the run was interrupted.
+bool waitStep(const char* why)
 {
-    std::cout << "  " << tag << " joint1 q=" << std::fixed << std::setprecision(3)
-              << s.q[1] << " dq=" << s.dq[1] << " tau=" << s.tau[1]
-              << "  errors=0x" << std::hex << std::setw(8) << std::setfill('0') << s.error_bits
-              << " (Error_L 0x" << std::setw(4) << (s.error_bits & 0xFFFFu)
-              << " Error_H 0x" << std::setw(4) << (s.error_bits >> 16) << ")"
-              << std::dec << std::setfill(' ');
+    std::cout << "  ... waiting "
+              << std::chrono::duration_cast<std::chrono::seconds>(kStep).count()
+              << " s (" << why << ")" << std::endl;
+    const auto until = std::chrono::steady_clock::now() + kStep;
+    while (g_run && std::chrono::steady_clock::now() < until) {
+        std::this_thread::sleep_for(100ms);
+    }
+    return g_run;
 }
 
-// Bring-up sequence for one hand, pausing 1 s after each service call:
-// start broadcast -> force-control + enable -> verify mc_state -> set gains.
-// Returns false on the first failed step.
-bool bringUp(hand_sdk::Api& api, const char* tag, Hand hand)
+const char* mcStateName(McState state)
 {
-    using hand_sdk::service::ComCmd;
-    using hand_sdk::service::LoopMode;
-    using hand_sdk::service::McState;
-
-    // 1. start responding to broadcast (power-on default is off).
-    const auto comm = api.serviceComm(hand, ComCmd::kStartBroadcast);
-    std::cout << "  " << tag << " comm start broadcast: "
-              << (comm.msg) << "\n";
-            //   << (comm.success ? "ok" : comm.msg) << "\n";
-    if (!comm.success) {
-        return false;
+    switch (state) {
+    case McState::kNone:    return "none";
+    case McState::kInit:    return "init";
+    case McState::kStandby: return "standby";
+    case McState::kActive:  return "active";
+    case McState::kFault:   return "fault";
     }
-    std::this_thread::sleep_for(1s);
+    return "unknown";
+}
 
-    // 2. force-control mode with control enabled (standby -> active).
-    const auto mode = api.serviceMode(hand, LoopMode::kForceControl, true);
-    if (!mode.success) {
-        std::cout << "  " << tag << " mode set failed: " << mode.msg << "\n";
-        return false;
-    }
-    std::cout << "  " << tag << " mode set: joint0 reports mode="
-              << static_cast<int>(mode.value[0].mode)
-              << " enabled=" << mode.value[0].enabled << "\n";
-    std::this_thread::sleep_for(1s);
-
-    // 3. every joint should now be in standby or active.
-    const auto mc = api.serviceMcState(hand);
-    if (!mc.success) {
-        std::cout << "  " << tag << " mc-state query failed: " << mc.msg << "\n";
-        return false;
-    }
-    int not_ready = 0;
-    for (const auto& joint : mc.value) {
-        if (joint.state != McState::kStandby && joint.state != McState::kActive) {
-            ++not_ready;
+// One line per joint that is saying anything, plus a tally. Joints reporting
+// `none` are folded into the tally rather than printed: on a partial rig most
+// of the twenty-one slots are empty and listing them buries the ones that are
+// not.
+void printMcState(const hand_sdk::service::McStatusArray& states)
+{
+    int reporting = 0;
+    for (std::size_t j = 0; j < states.size(); ++j) {
+        if (states[j].state == McState::kNone) {
+            continue;
         }
+        ++reporting;
+        std::cout << "    j" << std::setw(2) << std::setfill('0') << j << std::setfill(' ')
+                  << ": " << mcStateName(states[j].state);
+        if (states[j].fault_code != hand_sdk::service::fault::kNone) {
+            std::cout << "  fault_code=0x" << std::hex << states[j].fault_code << std::dec;
+        }
+        std::cout << "\n";
     }
-    std::cout << "  " << tag << " mc-state: "
-              << (21 - not_ready) << "/21 joints standby|active\n";
-    if (not_ready > 0) {
-        return false;
-    }
-    std::this_thread::sleep_for(1s);
+    std::cout << "    " << reporting << "/" << states.size()
+              << " joints reporting a state (the rest are `none`)" << std::endl;
+}
 
-    // 4. force-mode position loop gains, broadcast to all joints.
-    const auto gains = api.serviceGains(hand, 3.0f, 3.0f);
-    if (!gains.success) {
-        std::cout << "  " << tag << " gains set failed: " << gains.msg << "\n";
-        return false;
+void printCalib(const hand_sdk::service::ZeroCalStateArray& states)
+{
+    for (std::size_t j = 0; j < states.size(); ++j) {
+        // Every slot is printed here, unlike mc_state: `0 not calibrated` is a
+        // real answer for this query, not an empty slot.
+        std::cout << "    j" << std::setw(2) << std::setfill('0') << j << std::setfill(' ')
+                  << ": " << std::setw(2) << static_cast<int>(states[j])
+                  << "  " << hand_sdk::service::stateName(states[j]) << "\n";
     }
-    std::cout << "  " << tag << " gains set: joint0 reports kp="
-              << gains.value[0].kp << " kd=" << gains.value[0].kd << "\n";
-    std::this_thread::sleep_for(1s);
+    std::cout << std::flush;
+}
 
-    return true;
+// Cycle health, printed after every service call. exchange_failures is the
+// count of cycles whose working counter came up short -- if it climbs between
+// two steps, frames were lost in between and any failure above is the wire's
+// doing rather than the device's.
+void printStats(hand_sdk::Api& api)
+{
+    const auto s = api.cycleStats();
+    std::cout << "    [cycles " << s.cycles
+              << " | exchange failures " << s.exchange_failures
+              << " | phase " << s.phase_error_ns / 1000 << " us]" << std::endl;
+}
+
+// A read service, run and reported. Returns false only if the run was
+// interrupted -- a failed call is printed and the script carries on, since each
+// step here is worth seeing independently of whether the last one worked.
+bool readMcState(hand_sdk::Api& api, Hand hand, const char* tag)
+{
+    std::cout << tag << ": serviceMcState()" << std::endl;
+    const auto mc = api.serviceMcState(hand);
+    if (mc.success) {
+        std::cout << "  OK -- " << mc.msg << "\n";
+        printMcState(mc.value);
+    } else {
+        std::cout << "  FAILED -- " << mc.msg << std::endl;
+    }
+    printStats(api);
+    return g_run;
+}
+
+// Starts the routine on one joint and nothing else: every other slot carries
+// the device's "no action" word. Success means the device took the request --
+// the routine itself runs for seconds past the 10 ms service window, so the
+// outcome is read later with serviceZeroCalibrateState().
+bool calibrateJoint(hand_sdk::Api& api, Hand hand, std::size_t joint, const char* tag)
+{
+    std::cout << tag << ": serviceZeroCalibrate(j" << joint << ") -- this joint only"
+              << std::endl;
+    const auto cal = api.serviceZeroCalibrate(
+        hand,
+        hand_sdk::service::ZeroCalDir::kSameAsEncoder,
+        hand_sdk::service::JointMask::single(joint));
+    if (cal.success) {
+        std::cout << "  OK -- request accepted, calibration started (" << cal.msg << ")\n"
+                  << "    j" << joint << " reports "
+                  << hand_sdk::service::stateName(cal.value[joint]) << std::endl;
+    } else {
+        std::cout << "  FAILED -- " << cal.msg << std::endl;
+    }
+    printStats(api);
+    return g_run;
 }
 
 } // namespace
@@ -125,83 +175,93 @@ int main()
     config.right_hand_name = "hand_200_R";
 
     // --- 1. connect ---------------------------------------------------------
-    auto hand = hand_sdk::createEthercat(config);
+    auto api = hand_sdk::createEthercat(config);
 
-    const auto connected = hand.connect();
+    std::cout << "1. connect()" << std::endl;
+    const auto connected = api.connect();
     if (!connected.success) {
-        std::cerr << "Connect failed: " << connected.msg << "\n";
+        std::cerr << "  FAILED -- " << connected.msg << std::endl;
         return 1;
     }
 
-    std::cout << "left "  << (connected.value.has_left  ? hand.leftStatus().state_text  : "absent")
-              << " | right " << (connected.value.has_right ? hand.rightStatus().state_text : "absent")
-              << " | DC " << (hand.dcActive() ? "armed" : "off") << "\n"
-              << "running " << std::chrono::duration_cast<std::chrono::hours>(kRunTime).count()
-              << " h, Ctrl-C to stop early\n\n";
+    // Every step below addresses one hand. Left when it is there, otherwise
+    // right -- the same rule the GUI's readings grid uses.
+    const Hand hand = connected.value.has_left ? Hand::kLeft : Hand::kRight;
+    const char* hand_tag = connected.value.has_left ? "left" : "right";
 
-    // --- 2. bring-up, one service call per second ----------------------------
-    std::this_thread::sleep_for(1s);
-    if (connected.value.has_left && !bringUp(hand, "L", Hand::kLeft)) {
-        std::cout << "  L bring-up aborted\n";
-    }
-    std::this_thread::sleep_for(1s);
-    if (connected.value.has_right && !bringUp(hand, "R", Hand::kRight)) {
-        std::cout << "  R bring-up aborted\n";
-    }
-    std::cout << "\n";
+    std::cout << "  OK -- left " << (connected.value.has_left ? "yes" : "no")
+              << " | right " << (connected.value.has_right ? "yes" : "no")
+              << " | DC " << (api.dcActive() ? "armed" : "off") << "\n"
+              << "  driving the " << hand_tag << " hand\n"
+              << "  left state " << api.leftStatus().state_text
+              << " | right state " << api.rightStatus().state_text << std::endl;
+    printStats(api);
 
-    // --- 3. loop: random joint-0 setpoint out, joint-0 state back ------------
-    std::mt19937 rng{std::random_device{}()};
-    std::uniform_real_distribution<float> q_dist{-kRandQ, kRandQ};
-    std::uniform_real_distribution<float> dq_dist{-kRandDq, kRandDq};
-    std::uniform_real_distribution<float> tau_dist{-kRandTau, kRandTau};
+    // --- 2..5. two mc_state reads, five seconds apart -----------------------
+    if (waitStep("settle before the first read") &&
+        readMcState(api, hand, "3. mc_state (first)") &&
+        waitStep("between the two reads") &&
+        readMcState(api, hand, "5. mc_state (second)") &&
+        waitStep("before calibrating") &&
+        readMcState(api, hand, "6. mc_state (third)") &&
+        waitStep("before calibrating") &&
 
-    const auto start    = std::chrono::steady_clock::now();
-    const auto deadline = start + kRunTime;
+        // --- 6..7. calibrate the first joint --------------------------------
+        calibrateJoint(api, hand, kFirstJoint, "7. zero-calibrate first joint") &&
+        waitStep("let the routine run")) {
 
-    for (int sec = 0; g_run && std::chrono::steady_clock::now() < deadline; ++sec) {
-        std::this_thread::sleep_for(1s);
-
-        hand_sdk::frames::HandCommand joint0_command;
-        joint0_command.q[1]   = q_dist(rng);
-        joint0_command.dq[1]  = dq_dist(rng);
-        joint0_command.tau[1] = tau_dist(rng);
-
-        hand_sdk::frames::DualHandCommand command;
-        command.has_left  = connected.value.has_left;
-        command.left      = joint0_command;
-        command.has_right = connected.value.has_right;
-        command.right     = joint0_command;
-
-        const auto sent = hand.sendCommand(command);
-
-        std::cout << "[" << std::setw(3) << sec << "] write joint0 q="
-                  << std::fixed << std::setprecision(3) << joint0_command.q[1]
-                  << " dq=" << joint0_command.dq[1]
-                  << " tau=" << joint0_command.tau[1];
-        if (!sent.success) {
-            std::cout << " (send failed: " << sent.msg << ")";
-        }
-
-        const auto state = hand.readState();
-        if (state.success) {
-            if (state.value.has_left)  { printState("L", state.value.left); }
-            if (state.value.has_right) { printState("R", state.value.right); }
+        // --- 9. where every joint's calibration got to ----------------------
+        std::cout << "9. serviceZeroCalibrateState() -- all joints" << std::endl;
+        const auto cal = api.serviceZeroCalibrateState(hand);
+        if (cal.success) {
+            std::cout << "  OK -- " << cal.msg << "\n";
+            printCalib(cal.value);
         } else {
-            std::cout << "  read failed: " << state.msg;
+            std::cout << "  FAILED -- " << cal.msg << std::endl;
         }
-        std::cout << std::endl;
+        printStats(api);
+
+        // --- 10. calibrate the second joint ---------------------------------
+        calibrateJoint(api, hand, kSecondJoint, "10. zero-calibrate second joint");
     }
 
-    // --- 4. disconnect ------------------------------------------------------
-    const auto stats = hand.cycleStats();
-    hand.disconnect();
+    if (!g_run) {
+        std::cout << "\ninterrupted" << std::endl;
+    }
 
-    std::cout << "\ncycles " << stats.cycles
+    // --- 11. disconnect -----------------------------------------------------
+    // Read the stats before disconnect(): it stops the cyclic thread.
+    const auto stats = api.cycleStats();
+    api.disconnect();
+
+    // AL state as of disconnect(), which re-reads it. If the exchange died
+    // mid-run this is where it says why: a slave that fell out of OP stops
+    // acknowledging writes to its output SyncManager, which is exactly what a
+    // short working counter on every cycle looks like from the master side.
+    const auto& ls = api.leftStatus();
+    const auto& rs = api.rightStatus();
+
+    std::cout << "\n11. disconnected\n"
+              << "  cycles " << stats.cycles
               << " | exchange failures " << stats.exchange_failures
-              << " | phase " << stats.phase_error_ns / 1000 << " us\n"
-              << "left "  << hand.leftStatus().state_text
-              << " | right " << hand.rightStatus().state_text << "\n";
+              << " | phase " << stats.phase_error_ns / 1000 << " us\n";
+
+    const auto printSlave = [](const char* tag, const hand_sdk::SlaveStatus& st) {
+        if (!st.present) {
+            std::cout << "  " << tag << ": absent\n";
+            return;
+        }
+        std::cout << "  " << tag << ": " << st.state_text
+                  << "  (AL status 0x" << std::hex << st.al_state
+                  << ", code 0x" << st.al_status_code << std::dec << ")";
+        if (!st.error_text.empty()) {
+            std::cout << "  -- " << st.error_text;
+        }
+        std::cout << "\n";
+    };
+    printSlave("left ", ls);
+    printSlave("right", rs);
+    std::cout << std::flush;
 
     return 0;
 }

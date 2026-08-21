@@ -99,6 +99,13 @@ private:
     Config config_;
     bool connected_{false};
 
+    // Whether the last exchangeRaw() was answered by every present slave.
+    // copyInputs() refuses to hand back the in buffers when it was not: on a
+    // short working counter the buffers still hold the previous frame, and a
+    // stale copy is indistinguishable from a device that genuinely replied
+    // zeros. Reporting the failure is what lets the layers above say so.
+    bool last_exchange_ok_{false};
+
     int left_slave_id_{-1};
     int right_slave_id_{-1};
 

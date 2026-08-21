@@ -94,11 +94,13 @@ public:
     // a call made while another is in flight fails immediately with
     // "another service call is in progress". See include/service.hpp for types.
     //
-    // The two read services (serviceModeQuery, serviceMcState) succeed once a
-    // reply block for the hand comes back with the right cmd id -- there is
-    // nothing else to check, since nothing was asked to change.
+    // The four read services (serviceModeQuery, serviceMcState,
+    // serviceGainsQuery, serviceZeroCalibrateState) succeed once a reply block
+    // for the hand comes back with the right cmd id -- there is nothing else to check, since
+    // nothing was asked to change. serviceZeroCalibrate is a write that stops
+    // at the same bar, for the reason given at its declaration.
     //
-    // The three write services (serviceComm, serviceMode, serviceGains) put
+    // The three verified write services (serviceComm, serviceMode, serviceGains) put
     // that same transport check first and then verify the reply per joint:
     // every joint the request addressed must echo what it was told, exactly for
     // the enum writes and within Config::service_tolerance for gains. One
@@ -112,6 +114,24 @@ public:
 
     // cmd 4: start/stop broadcast responses.
     Result<service::ComStatusArray> serviceComm(service::Hand hand, service::ComCmd cmd);
+
+    // cmd 10: start the position zero-point calibration on the selected joints
+    // (default: all), turning first in `dir` relative to the magnetic encoder.
+    // The device clears the request field itself when the routine ends.
+    //
+    // Unlike the other writes this one is not verified per joint: the routine
+    // outlives the 10-cycle service window by a long way, so there is no
+    // outcome to echo yet -- a reply block on cmd 10 is the whole of what
+    // success means here. Poll serviceZeroCalibrateState() for the result.
+    Result<service::ZeroCalStateArray> serviceZeroCalibrate(
+        service::Hand hand,
+        service::ZeroCalDir dir = service::ZeroCalDir::kSameAsEncoder,
+        service::JointMask joints = service::JointMask::all());
+
+    // cmd 10 as a query: every payload slot carries the ignore word, so no
+    // calibration is started and the reply reports the per-joint
+    // pos_zero_calibration_state. msg spells the state codes out by joint.
+    Result<service::ZeroCalStateArray> serviceZeroCalibrateState(service::Hand hand);
 
     // cmd 11: set closed-loop mode and control enable on the selected joints
     // (default: all of them). Joints outside the mask get the device's "no
@@ -139,6 +159,11 @@ public:
         service::Hand hand,
         float kp, float kd,
         service::JointMask joints = service::JointMask::all());
+
+    // cmd 14 as a query: the read bit is set and every payload slot carries the
+    // ignore word, so nothing is written and the reply reports the gains each
+    // joint is already running.
+    Result<service::JointGainsArray> serviceGainsQuery(service::Hand hand);
 
     // --- Status -------------------------------------------------------------
 

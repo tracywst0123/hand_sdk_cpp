@@ -85,6 +85,55 @@ inline bool decodeComm(const ServiceData& sd, service::ComStatusArray& out)
     return true;
 }
 
+// --- cmd_id 10: position zero-point calibration ------------------------------
+// pos_zero_calibration packs the request in the low byte and the initial
+// rotation direction in the high byte; the reply carries
+// pos_zero_calibration_state in d2. hall_backlash_abspos (d1) is not used here,
+// so it goes out as the ignore word.
+inline int16_t zeroCalWord(service::ZeroCalCmd cmd, service::ZeroCalDir dir)
+{
+    const auto packed = static_cast<uint16_t>(
+        (static_cast<uint16_t>(dir) << 8) | static_cast<uint16_t>(cmd));
+    return static_cast<int16_t>(packed);
+}
+
+inline ServiceData encodeZeroCal(service::ZeroCalCmd cmd, service::ZeroCalDir dir,
+                                 const service::JointMask& joints)
+{
+    ServiceData sd{};
+    sd.cmd = cmdWord(10, true);
+    fillSelected(sd, joints, zeroCalWord(cmd, dir), kIgnore, kIgnore);
+    return sd;
+}
+
+// Ask what pos_zero_calibration_state currently is without starting anything.
+//
+// The read bit is what makes this a query, same as cmd 12 and cmd 14 -- asking
+// must not go out as a write. The payload is the ignore word on top of that, so
+// the request reads as "no action" under either reading: if the device honours
+// the read bit nothing is written, and if it somehow does not, 0xFF's low byte
+// is still not the 0x01 that starts a calibration.
+inline ServiceData encodeZeroCalQuery()
+{
+    ServiceData sd{};
+    sd.cmd = cmdWord(10, false);  // false is read-only encoding
+    fillSlots(sd, kIgnore, kIgnore, kIgnore);
+    return sd;
+}
+
+inline bool decodeZeroCal(const ServiceData& sd, service::ZeroCalStateArray& out)
+{
+    if (cmdId(sd.cmd) != 10) {
+        return false;
+    }
+    for (std::size_t j = 0; j < kNumJoints; ++j) {
+        // Signed on purpose: the failure code is -1, i.e. 0xFF in the low byte.
+        out[j] = static_cast<service::ZeroCalState>(
+            static_cast<int8_t>(word(sd, j, 2) & 0xFF));
+    }
+    return true;
+}
+
 // --- cmd_id 11: loop mode + control enable -----------------------------------
 inline ServiceData encodeMode(service::LoopMode mode, bool enable,
                               const service::JointMask& joints)
@@ -97,12 +146,13 @@ inline ServiceData encodeMode(service::LoopMode mode, bool enable,
     return sd;
 }
 
-// Ask what the mode/enable currently is without changing it: cmd 11 with the
-// ignore word in every payload slot, which is the device's own "no action".
+// Ask what the mode/enable currently is without changing it. The read bit makes
+// it a query; the ignore word in every payload slot is the device's own "no
+// action" on top of that, so nothing is written under either reading.
 inline ServiceData encodeModeQuery()
 {
     ServiceData sd{};
-    sd.cmd = cmdWord(11, true);
+    sd.cmd = cmdWord(11, false);  // false is read-only encoding
     fillSlots(sd, kIgnore, kIgnore, kIgnore);
     return sd;
 }
@@ -148,6 +198,23 @@ inline ServiceData encodeGains(float kp, float kd, const service::JointMask& joi
     ServiceData sd{};
     sd.cmd = cmdWord(14, true);
     fillSelected(sd, joints, toFixed(kp, kGainScale), toFixed(kd, kGainScale), kIgnore);
+    return sd;
+}
+
+// Ask what the gains currently are without changing them.
+//
+// The read bit is what makes this a query, same as cmd 12. The payload is the
+// ignore word rather than the zeros encodeMcQuery() sends, and deliberately so:
+// cmd 12 has no writable field, so zeros there mean nothing, but a zero in a
+// cmd 14 slot is a perfectly good request for kp = 0. Sending ignore means the
+// request reads as "no action" under either reading -- if the device honours
+// the read bit, nothing is written; if it somehow does not, the slots still say
+// no action rather than "zero every gain on the hand".
+inline ServiceData encodeGainsQuery()
+{
+    ServiceData sd{};
+    sd.cmd = cmdWord(14, false);  // false is read-only encoding
+    fillSlots(sd, kIgnore, kIgnore, kIgnore);
     return sd;
 }
 
