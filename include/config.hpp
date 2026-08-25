@@ -27,7 +27,7 @@ struct DcConfig
 
     // Target phase of the master task inside the DC cycle: after SYNC0, and
     // clear of sync0_shift_ns by more than the phase jitter.
-    int64_t master_offset_ns{400'000};
+    int64_t master_offset_ns{100'000}; // 400'000
 
     // Write 0x1C32:01 / 0x1C33:01 in PREOP so the device acts on SYNC0.
     // Non-fatal: devices that hardwire the sync type reject it; we log the

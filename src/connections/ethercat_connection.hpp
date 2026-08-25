@@ -60,6 +60,16 @@ public:
     const SlaveStatus& leftStatus() const { return left_status_; }
     const SlaveStatus& rightStatus() const { return right_status_; }
 
+    // Read the hands' AL state straight off the wire -- one register FPRD each,
+    // no mailbox -- and describe it in `text`. Returns true when every present
+    // hand is in OP with no error latched.
+    //
+    // Unlike syncDiagnostics() this is safe to call from the cyclic thread: two
+    // datagrams, the same order of cost as the exchange itself. It is still not
+    // free, so CyclicTask only calls it on the edge into failure, where the
+    // cycle's deadline is already gone.
+    bool probeOperational(std::string& text);
+
 private:
     // Read every slave's AL state off the bus and cache it into left/right
     // status. Bus traffic — only safe when the cyclic thread is not running.

@@ -295,6 +295,64 @@ bool EthercatConnection::hasRight() const
 }
 
 
+bool EthercatConnection::probeOperational(std::string& text)
+{
+    text.clear();
+    if (!connected_) {
+        text = "not connected";
+        return false;
+    }
+
+    bool all_op = true;
+
+    const auto probe = [&](const char* label, int slave_id, uint16_t addr) {
+        if (slave_id == -1) {
+            return;
+        }
+        if (!text.empty()) {
+            text += " | ";
+        }
+        text += label;
+
+        // 0x0130 AL status, 0x0132 reserved, 0x0134 AL status code: one
+        // six-byte FPRD gets the state and the reason in a single datagram.
+        uint8_t buf[6]{};
+        const int wkc = ecx_FPRD(&context_.port, addr, static_cast<uint16_t>(ECT_REG_ALSTAT),
+                                 static_cast<uint16_t>(sizeof(buf)), buf, EC_TIMEOUTRET);
+        if (wkc <= 0) {
+            // The slave did not answer a register read either, so this is the
+            // wire, not the state machine -- cable, PHY, or the device is gone.
+            text += " no answer (link?)";
+            all_op = false;
+            return;
+        }
+
+        uint16_t state = 0;
+        uint16_t code  = 0;
+        std::memcpy(&state, buf, sizeof(state));
+        std::memcpy(&code, buf + 4, sizeof(code));
+        state = etohs(state);
+        code  = etohs(code);
+
+        text += " " + alStateText(state);
+        if (code != 0) {
+            std::ostringstream oss;
+            oss << " (AL 0x" << std::hex << std::setw(4) << std::setfill('0') << code
+                << std::dec << " " << ec_ALstatuscode2string(code) << ")";
+            text += oss.str();
+        }
+
+        if ((state & 0x0F) != EC_STATE_OPERATIONAL || (state & EC_STATE_ERROR) != 0) {
+            all_op = false;
+        }
+    };
+
+    probe("left", left_slave_id_, left_addr_);
+    probe("right", right_slave_id_, right_addr_);
+
+    return all_op;
+}
+
 bool EthercatConnection::update()
 {
     if (!connected_) {

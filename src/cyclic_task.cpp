@@ -58,6 +58,29 @@ void CyclicTask::stop()
         if (connection_.hasRight()) {
             right_diag_ = connection_.syncDiagnostics(connection_.rightSlaveId());
         }
+
+        // The device's own account of the run. 0x1C32:0B / 0x1C33:0B count the
+        // cycles where its application was still busy when the next SYNC0 came
+        // -- i.e. the slave missed its deadline, not us. Nonzero here separates
+        // "the hand choked on what we sent" from "we stopped feeding it", which
+        // is the whole question when a service call costs us OP.
+        const auto report = [](const char* label, const SyncDiagnostics& d) {
+            if (!d.valid) {
+                return;
+            }
+            std::clog << "[cyclic] " << label << " sync diagnostics:"
+                      << " sync type out/in " << d.out_sync_type << "/" << d.in_sync_type
+                      << " | cycle exceeded out/in " << d.out_cycle_exceeded << "/"
+                      << d.in_cycle_exceeded
+                      << " | shift too short out/in " << d.out_shift_too_short << "/"
+                      << d.in_shift_too_short;
+            if (d.out_cycle_exceeded != 0 || d.in_cycle_exceeded != 0) {
+                std::clog << "  <-- the device missed its own SYNC0 deadline";
+            }
+            std::clog << std::endl;
+        };
+        report("left", left_diag_);
+        report("right", right_diag_);
     }
 
     connection_.disconnect();
@@ -109,6 +132,24 @@ void CyclicTask::run()
     }
     int service_cycle = -1;
 
+    // Bus health, reported on the edges. Without this a dropout is invisible
+    // until some later service call comes back empty, which reads like a
+    // service fault when it is really the wire or the state machine: a link
+    // glitch longer than the slave's SM watchdog knocks it out of OP, and from
+    // then on the output FPWR stops being counted, so every exchange is short
+    // and every service window captures nothing.
+    //
+    // Edge-triggered because probeOperational() puts datagrams on the wire: it
+    // runs on the transition into failure -- where the cycle is already blown
+    // anyway -- and then at most once a second for as long as it stays broken.
+    bool exchange_healthy = true;
+    uint64_t cycle = 0;
+    uint64_t last_probe_cycle = 0;
+    const uint64_t probe_interval_cycles =
+        config_.dc.sync0_cycle_ns > 0
+            ? static_cast<uint64_t>(1000000000LL / config_.dc.sync0_cycle_ns)
+            : 1000;
+
     while (!stop_requested_.load(std::memory_order_acquire)) {
         timer.waitNextCycle();
 
@@ -139,8 +180,25 @@ void CyclicTask::run()
 
         connection_.stageOutputs(wire);
 
-        if (!connection_.update()) {
+        const bool exchange_ok = connection_.update();
+        if (!exchange_ok) {
             exchange_failures_.fetch_add(1, std::memory_order_relaxed);
+            if (exchange_healthy || cycle - last_probe_cycle >= probe_interval_cycles) {
+                std::string where;
+                connection_.probeOperational(where);
+                std::clog << "[cyclic] bus not answering at cycle " << cycle << ": " << where
+                          << " (" << exchange_failures_.load(std::memory_order_relaxed)
+                          << " exchanges lost so far)" << std::endl;
+                last_probe_cycle = cycle;
+            }
+            exchange_healthy = false;
+        } else if (!exchange_healthy) {
+            std::string where;
+            const bool op = connection_.probeOperational(where);
+            std::clog << "[cyclic] bus answering again at cycle " << cycle << ": " << where
+                      << (op ? "" : " -- exchanging but NOT in OP, service replies will be stale")
+                      << std::endl;
+            exchange_healthy = true;
         }
 
         // Wire -> state holder.
@@ -181,6 +239,7 @@ void CyclicTask::run()
         timer.syncTo(connection_.dcTime());
         phase_error_ns_.store(timer.phaseError(), std::memory_order_relaxed);
         cycles_.fetch_add(1, std::memory_order_relaxed);
+        ++cycle;
     }
 }
 
