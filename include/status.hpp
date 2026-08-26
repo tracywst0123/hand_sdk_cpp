@@ -57,6 +57,10 @@ struct SyncDiagnostics
     // 1, so do not read a mismatch here as a fault without the device manual.
     uint16_t out_sync_type{0};
     uint16_t in_sync_type{0};
+    uint32_t out_cycle_time_ns{0};     // 0x1C32:02
+    uint32_t in_cycle_time_ns{0};      // 0x1C33:02
+    int32_t out_shift_time_ns{0};      // 0x1C32:03
+    int32_t in_shift_time_ns{0};       // 0x1C33:03
 
     // Subindices per ETG.1020. These were previously mislabelled one position
     // out: :0B is the SM-event counter, not a cycle overrun, and shift-time is

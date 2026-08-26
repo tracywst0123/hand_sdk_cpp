@@ -78,6 +78,10 @@ void CyclicTask::stop()
         std::clog << "[cyclic] " << label << " sync diagnostics:"
                   << " sync type out/in 0x" << std::hex << d.out_sync_type << "/0x"
                   << d.in_sync_type << std::dec
+                  << " | cycle ns " << d.out_cycle_time_ns << "/"
+                  << d.in_cycle_time_ns
+                  << " | shift ns " << d.out_shift_time_ns << "/"
+                  << d.in_shift_time_ns
                   << " | SM event missed " << d.out_sm_event_missed << "/"
                   << d.in_sm_event_missed
                   << " | cycle too small " << d.out_cycle_too_small << "/"

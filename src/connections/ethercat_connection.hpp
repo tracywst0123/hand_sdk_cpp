@@ -93,9 +93,13 @@ private:
     // per slave. Returns summed working counter. See exchangeRaw() definition for why.
     int exchangeRaw();
 
-    // Write 0x1C32:01 / 0x1C33:01 (SyncManager sync type) and log the readback.
+    // Write 0x1C32 / 0x1C33 SyncManager parameters and log the readback.
     // PREOP only; failures are logged, not fatal.
-    void writeSyncType(int slave_id, uint16_t index, uint16_t sync_type);
+    void writeSyncParameters(int slave_id, uint16_t index, uint16_t sync_type,
+                             int32_t shift_time_ns, bool write_timing);
+
+    bool dcSynchronRequested() const;
+    bool freeRunRequested() const;
 
     // True if the slave's name matches the configured left or right hand.
     bool isHandSlave(int slave_id) const;

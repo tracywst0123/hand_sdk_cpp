@@ -6,25 +6,21 @@
 namespace hand_sdk
 {
 
-// Distributed Clocks (DC-Synchron) parameters.
+// EtherCAT synchronisation parameters.
 //
-// SYNC0-only device: each ESC acts on its own drift-corrected SYNC0 pulse
-// rather than on frame arrival. Register details and the reasoning behind
-// every default here: notes.md, "DC-Synchron bring-up".
-struct DcConfig
+// DC-Synchron: each ESC acts on its own drift-corrected SYNC0/SYNC1 pulses
+// rather than on frame arrival. SM-Synchron: the application acts on the
+// SyncManager event. FreeRun: no device sync is requested; the master still
+// exchanges at sync0_cycle_ns on its own local timer. Register details and the
+// reasoning behind every default here: notes.md, "DC-Synchron bring-up".
+struct SyncConfig
 {
-    // False: no SYNC pulses at all, and the sync type below is what the device
-    // is asked to run -- SM-Synchron, acting on data arrival rather than on a
-    // clock. True: arm the cyclic unit and phase-lock the master to the DC grid.
-    //
-    // Off by default: this device rejects the 0x1C32/0x1C33 writes and does not
-    // answer the readback, so nothing ever confirms it honours SYNC0, and
-    // driving it in DC produced AL 0x001A "Synchronization error". Flip back to
-    // true to retest DC -- nothing below is deleted.
-    bool enabled{false};
+    bool free_run{true};  // true = no DC/SM synchronisation requested
+    bool use_dc{false};  // true = DC-Synchron, false = SM-Synchron
 
-    // SYNC0 period. Must equal the master cycle period; device floor 100 us.
-    uint32_t sync0_cycle_ns{1'000'000};
+    // Master cycle period. In DC mode this must equal the SYNC0 period; in
+    // SM/FreeRun it is simply how often the cyclic thread exchanges PDOs.
+    uint32_t sync0_cycle_ns{2'000'000};
 
     // SYNC0 offset from the DC grid boundary.
     int32_t sync0_shift_ns{100'000};
@@ -36,14 +32,14 @@ struct DcConfig
     // clear of sync0_shift_ns by more than the phase jitter.
     int64_t master_offset_ns{400'000};
 
-    // Write 0x1C32:01 / 0x1C33:01 in PREOP, asking the device for the sync type
-    // below. Attempted in both modes -- the mode is the point of the write, not
-    // a DC detail. Non-fatal: devices that hardwire the sync type reject it, and
-    // we log the readback either way, which is what actually decides the mode.
+    // Write 0x1C32 / 0x1C33 in PREOP, asking the device for the selected sync
+    // mode. In SM/DC modes this also writes the cycle/shift timing above.
+    // Non-fatal: devices that hardwire these objects reject writes, and we log
+    // the readback either way.
     bool write_sync_type{true};
 
-    // 0 = FreeRun, 1 = SM-Synchron, 2 = DC SYNC0, 3 = DC SYNC1.
-    // Follow `enabled`: 1 with it off, 2 with it on.
+    // Deprecated compatibility fields. The connection now derives the sync
+    // type from free_run/use_dc: 0/0 FreeRun, 1/1 SM-Synchron, 2/3 DC Sync0/1.
     uint16_t out_sync_type{1};
     uint16_t in_sync_type{1};
 };
@@ -53,7 +49,7 @@ struct Config
     std::string interface_name{"enp132s0"};
     std::string left_hand_name{"hand_200_L"};
     std::string right_hand_name{"hand_200_R"};
-    DcConfig dc{};
+    SyncConfig dc{};
 
     // Push a slave that has fallen out of OP back towards it, from the cyclic
     // thread, instead of leaving the run dead until the next connect().

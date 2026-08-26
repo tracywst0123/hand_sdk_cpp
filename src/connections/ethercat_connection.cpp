@@ -15,6 +15,11 @@ namespace hand_sdk::connections
 namespace
 {
 
+constexpr uint16_t kFreeRunSyncType   = 0;
+constexpr uint16_t kSmSynchronSyncType = 1;
+constexpr uint16_t kDcSync0SyncType    = 2;
+constexpr uint16_t kDcSync1SyncType    = 3;
+
 // Render an AL status register as text. Low nibble is the state, bit 4 the
 // error latch — so 0x14 is "SAFE_OP+ERROR", the classic "device refused OP".
 std::string alStateText(uint16_t state)
@@ -73,17 +78,21 @@ std::string EthercatConnection::connect()
         std::clog << "  [" << i << "] '" << context_.slavelist[i].name << "'" << std::endl;
     }
 
-    // Ask the CoE application for the configured sync type, while still in PREOP
-    // where 0x1C32/0x1C33 are writable. Not gated on dc.enabled: running
-    // SM-Synchron is a mode the device has to be told about too, and leaving it
-    // in whatever it happened to be in last is how you end up guessing.
     if (config_.dc.write_sync_type) {
+        const bool free_run = freeRunRequested();
+        const bool dc_mode = dcSynchronRequested();
+        const uint16_t out_sync_type =
+            free_run ? kFreeRunSyncType : (dc_mode ? kDcSync0SyncType : kSmSynchronSyncType);
+        const uint16_t in_sync_type =
+            free_run ? kFreeRunSyncType : (dc_mode ? kDcSync1SyncType : kSmSynchronSyncType);
         for (int i = 1; i <= context_.slavecount; ++i) {
             if (!isHandSlave(i)) {
                 continue;
             }
-            writeSyncType(i, 0x1C32, config_.dc.out_sync_type);
-            writeSyncType(i, 0x1C33, config_.dc.in_sync_type);
+            writeSyncParameters(i, 0x1C32, out_sync_type, config_.dc.sync0_shift_ns,
+                                !free_run);
+            writeSyncParameters(i, 0x1C33, in_sync_type,
+                                config_.dc.sync1_shift_from_sync0_ns, !free_run);
         }
     }
 
@@ -94,9 +103,10 @@ std::string EthercatConnection::connect()
     }
 
     ecx_config_map_group(&context_, iomap_, 0);
-    // Only in DC mode: configdc arms no pulse of its own, but it does write DC
-    // registers, and a pure SM run should leave that state out of the picture.
-    if (config_.dc.enabled) {
+    if (!freeRunRequested()) {
+        // SM/DC modes. configdc measures propagation delays and starts the ESCs'
+        // system time; it arms no pulse of its own -- that is ecx_dcsync01()
+        // below, which stays DC-only.
         ecx_configdc(&context_);
     }
 
@@ -126,7 +136,7 @@ std::string EthercatConnection::connect()
     // --- Arm the DC cyclic unit (DC-Synchron) -------------------------------
     // 0x0981 is volatile, so it is re-armed on every connect; ecx_configdc()
     // above starts no pulse of its own.
-    if (config_.dc.enabled) {
+    if (dcSynchronRequested()) {
         if (!context_.slavelist[0].hasdc) {
             ecx_close(&context_);
             return "DC-Synchron requested but no DC-capable slave found on the bus";
@@ -154,12 +164,19 @@ std::string EthercatConnection::connect()
                   << std::endl;
         // SOEM schedules the first pulse ~100 ms out (its SyncDelay), so the
         // pulses come alive during the OP loop below while the PLLs settle.
+    } else if (freeRunRequested()) {
+        std::clog << "[EtherCAT] FreeRun: no DC clocks, no SYNC pulses;"
+                  << " master exchanges every " << config_.dc.sync0_cycle_ns / 1000
+                  << " us on its local timer"
+                  << std::endl;
     } else {
         // Said out loud because every later symptom reads differently depending
-        // on it: no SYNC pulses, no reference-clock datagram, and the cyclic
-        // timer free-running instead of phase-locked.
-        std::clog << "[EtherCAT] SM-Synchron: no SYNC pulses, master cycle "
-                  << config_.dc.sync0_cycle_ns / 1000 << " us free-running"
+        // on it: the DC clocks are configured (configdc ran above) but no SYNC
+        // pulses are armed, no reference-clock datagram goes out per cycle, and
+        // the cyclic timer free-runs instead of phase-locking.
+        std::clog << "[EtherCAT] SM-Synchron: DC clocks configured, no SYNC pulses;"
+                  << " master cycle " << config_.dc.sync0_cycle_ns / 1000
+                  << " us free-running, SM event drives the device"
                   << std::endl;
     }
 
@@ -295,6 +312,16 @@ void EthercatConnection::disconnect()
     right_slave_id_ = -1;
     connected_ = false;
     last_exchange_ok_ = false;
+}
+
+bool EthercatConnection::dcSynchronRequested() const
+{
+    return config_.dc.use_dc && !freeRunRequested();
+}
+
+bool EthercatConnection::freeRunRequested() const
+{
+    return config_.dc.free_run;
 }
 
 bool EthercatConnection::hasLeft() const
@@ -536,26 +563,83 @@ void EthercatConnection::captureStatus()
     fill(right_slave_id_, right_status_);
 }
 
-void EthercatConnection::writeSyncType(int slave_id, uint16_t index, uint16_t sync_type)
+void EthercatConnection::writeSyncParameters(int slave_id, uint16_t index,
+                                             uint16_t sync_type,
+                                             int32_t shift_time_ns,
+                                             bool write_timing)
 {
     const auto slave = static_cast<uint16_t>(slave_id);
 
-    if (ecx_SDOwrite(&context_, slave, index, 0x01, FALSE,
-                     static_cast<int>(sizeof(sync_type)), &sync_type, EC_TIMEOUTRXM) <= 0) {
-        std::clog << "[EtherCAT]   slave " << slave_id << " 0x" << std::hex << index
-                  << std::dec << ":01 write rejected (sync type may be fixed in firmware)"
-                  << std::endl;
-    }
+    const auto write16 = [&](uint8_t sub, const char* label, uint16_t value) {
+        if (ecx_SDOwrite(&context_, slave, index, sub, FALSE,
+                         static_cast<int>(sizeof(value)), &value, EC_TIMEOUTRXM) <= 0) {
+            std::clog << "[EtherCAT]   slave " << slave_id << " 0x" << std::hex
+                      << index << ":" << static_cast<int>(sub) << std::dec
+                      << " write rejected (" << label << " may be fixed in firmware)"
+                      << std::endl;
+        }
 
-    // Report what the device settled on either way — that, not our write, is
-    // what decides whether it honours the SYNC pulses.
-    uint16_t readback = 0;
-    int size = static_cast<int>(sizeof(readback));
-    if (ecx_SDOread(&context_, slave, index, 0x01, FALSE, &size, &readback, EC_TIMEOUTRXM) > 0) {
-        std::clog << "[EtherCAT]   slave " << slave_id << " 0x" << std::hex << index
-                  << ":01 sync type = 0x" << readback << std::dec
-                  << (readback == sync_type ? " (as requested)" : " (NOT as requested)")
-                  << std::endl;
+        uint16_t readback = 0;
+        int size = static_cast<int>(sizeof(readback));
+        if (ecx_SDOread(&context_, slave, index, sub, FALSE, &size, &readback,
+                        EC_TIMEOUTRXM) > 0) {
+            std::clog << "[EtherCAT]   slave " << slave_id << " 0x" << std::hex
+                      << index << ":" << static_cast<int>(sub) << " " << label
+                      << " = 0x" << readback << std::dec
+                      << (readback == value ? " (as requested)" : " (NOT as requested)")
+                      << std::endl;
+        }
+    };
+
+    const auto writeU32 = [&](uint8_t sub, const char* label, uint32_t value) {
+        if (ecx_SDOwrite(&context_, slave, index, sub, FALSE,
+                         static_cast<int>(sizeof(value)), &value, EC_TIMEOUTRXM) <= 0) {
+            std::clog << "[EtherCAT]   slave " << slave_id << " 0x" << std::hex
+                      << index << ":" << static_cast<int>(sub) << std::dec
+                      << " write rejected (" << label << " may be fixed in firmware)"
+                      << std::endl;
+        }
+
+        uint32_t readback = 0;
+        int size = static_cast<int>(sizeof(readback));
+        if (ecx_SDOread(&context_, slave, index, sub, FALSE, &size, &readback,
+                        EC_TIMEOUTRXM) > 0) {
+            std::clog << "[EtherCAT]   slave " << slave_id << " 0x" << std::hex
+                      << index << ":" << static_cast<int>(sub) << std::dec << " "
+                      << label << " = " << readback << " ns"
+                      << (readback == value ? " (as requested)" : " (NOT as requested)")
+                      << std::endl;
+        }
+    };
+
+    const auto writeI32 = [&](uint8_t sub, const char* label, int32_t value) {
+        if (ecx_SDOwrite(&context_, slave, index, sub, FALSE,
+                         static_cast<int>(sizeof(value)), &value, EC_TIMEOUTRXM) <= 0) {
+            std::clog << "[EtherCAT]   slave " << slave_id << " 0x" << std::hex
+                      << index << ":" << static_cast<int>(sub) << std::dec
+                      << " write rejected (" << label << " may be fixed in firmware)"
+                      << std::endl;
+        }
+
+        int32_t readback = 0;
+        int size = static_cast<int>(sizeof(readback));
+        if (ecx_SDOread(&context_, slave, index, sub, FALSE, &size, &readback,
+                        EC_TIMEOUTRXM) > 0) {
+            std::clog << "[EtherCAT]   slave " << slave_id << " 0x" << std::hex
+                      << index << ":" << static_cast<int>(sub) << std::dec << " "
+                      << label << " = " << readback << " ns"
+                      << (readback == value ? " (as requested)" : " (NOT as requested)")
+                      << std::endl;
+        }
+    };
+
+    // ETG.1020 SyncManager parameter objects:
+    // :01 sync type, :02 cycle time, :03 shift time. FreeRun writes only :01 so
+    // the device is not asked to use SM/DC timing; SM/DC write timing too.
+    write16(0x01, "sync type", sync_type);
+    if (write_timing) {
+        writeU32(0x02, "cycle time", config_.dc.sync0_cycle_ns);
+        writeI32(0x03, "shift time", shift_time_ns);
     }
 }
 
@@ -602,12 +686,38 @@ SyncDiagnostics EthercatConnection::syncDiagnostics(int slave_id)
         out = value;
         return true;
     };
+    const auto readU32 = [&](uint16_t index, uint8_t sub, uint32_t& out) {
+        uint32_t value = 0;
+        int size = static_cast<int>(sizeof(value));
+        const int wkc = ecx_SDOread(&context_, static_cast<uint16_t>(slave_id),
+                                    index, sub, FALSE, &size, &value, EC_TIMEOUTRXM);
+        if (wkc <= 0) {
+            return false;
+        }
+        out = value;
+        return true;
+    };
+    const auto readI32 = [&](uint16_t index, uint8_t sub, int32_t& out) {
+        int32_t value = 0;
+        int size = static_cast<int>(sizeof(value));
+        const int wkc = ecx_SDOread(&context_, static_cast<uint16_t>(slave_id),
+                                    index, sub, FALSE, &size, &value, EC_TIMEOUTRXM);
+        if (wkc <= 0) {
+            return false;
+        }
+        out = value;
+        return true;
+    };
 
     // Sync types are mandatory when the device supports these objects at all;
     // the error counters are optional, so their absence is not a failure.
     const bool ok = read16(0x1C32, 0x01, diag.out_sync_type) &&
                     read16(0x1C33, 0x01, diag.in_sync_type);
 
+    readU32(0x1C32, 0x02, diag.out_cycle_time_ns);
+    readU32(0x1C33, 0x02, diag.in_cycle_time_ns);
+    readI32(0x1C32, 0x03, diag.out_shift_time_ns);
+    readI32(0x1C33, 0x03, diag.in_shift_time_ns);
     read16(0x1C32, 0x0B, diag.out_sm_event_missed);
     read16(0x1C33, 0x0B, diag.in_sm_event_missed);
     read16(0x1C32, 0x0C, diag.out_cycle_too_small);
