@@ -150,6 +150,14 @@ void CyclicTask::run()
             ? static_cast<uint64_t>(1000000000LL / config_.dc.sync0_cycle_ns)
             : 1000;
 
+    // Recovery runs ten times faster than the report: a dropout costs two
+    // rounds (acknowledge the latch, then ask for OP), and there is no reason
+    // to spend two seconds on that when the pair of datagrams is this cheap.
+    const uint64_t recovery_interval_cycles =
+        probe_interval_cycles >= 10 ? probe_interval_cycles / 10 : 1;
+    uint64_t last_recovery_cycle = 0;
+    uint64_t recovery_attempts = 0;
+
     while (!stop_requested_.load(std::memory_order_acquire)) {
         timer.waitNextCycle();
 
@@ -188,17 +196,31 @@ void CyclicTask::run()
                 connection_.probeOperational(where);
                 std::clog << "[cyclic] bus not answering at cycle " << cycle << ": " << where
                           << " (" << exchange_failures_.load(std::memory_order_relaxed)
-                          << " exchanges lost so far)" << std::endl;
+                          << " exchanges lost so far)"
+                          << (config_.auto_recover ? ", recovering" : "") << std::endl;
                 last_probe_cycle = cycle;
+            }
+            if (config_.auto_recover &&
+                cycle - last_recovery_cycle >= recovery_interval_cycles) {
+                connection_.requestOperational();
+                ++recovery_attempts;
+                last_recovery_cycle = cycle;
             }
             exchange_healthy = false;
         } else if (!exchange_healthy) {
             std::string where;
             const bool op = connection_.probeOperational(where);
-            std::clog << "[cyclic] bus answering again at cycle " << cycle << ": " << where
-                      << (op ? "" : " -- exchanging but NOT in OP, service replies will be stale")
-                      << std::endl;
+            std::clog << "[cyclic] bus answering again at cycle " << cycle << ": " << where;
+            if (recovery_attempts != 0) {
+                std::clog << " (after " << recovery_attempts << " recovery attempt"
+                          << (recovery_attempts == 1 ? "" : "s") << ")";
+            }
+            if (!op) {
+                std::clog << " -- exchanging but NOT in OP, service replies will be stale";
+            }
+            std::clog << std::endl;
             exchange_healthy = true;
+            recovery_attempts = 0;
         }
 
         // Wire -> state holder.

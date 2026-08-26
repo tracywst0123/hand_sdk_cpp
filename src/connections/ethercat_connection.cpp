@@ -353,6 +353,50 @@ bool EthercatConnection::probeOperational(std::string& text)
     return all_op;
 }
 
+bool EthercatConnection::requestOperational()
+{
+    if (!connected_) {
+        return false;
+    }
+
+    bool all_op = true;
+
+    const auto nudge = [&](int slave_id, uint16_t addr) {
+        if (slave_id == -1) {
+            return;
+        }
+
+        uint16_t state = 0;
+        if (ecx_FPRD(&context_.port, addr, static_cast<uint16_t>(ECT_REG_ALSTAT),
+                     static_cast<uint16_t>(sizeof(state)), &state, EC_TIMEOUTRET) <= 0) {
+            // Unreachable. Writing AL control into the dark achieves nothing;
+            // wait for the wire and try again next time round.
+            all_op = false;
+            return;
+        }
+        state = etohs(state);
+
+        if ((state & 0x0F) == EC_STATE_OPERATIONAL && (state & EC_STATE_ERROR) == 0) {
+            return;
+        }
+        all_op = false;
+
+        // The error latch has to be acknowledged before the slave will accept
+        // any state change, so a fault takes two rounds: ACK now, request OP on
+        // the next call once the latch has cleared. Same sequence connect()
+        // uses; this just runs it while cycling.
+        context_.slavelist[slave_id].state = ((state & EC_STATE_ERROR) != 0)
+                                                 ? (EC_STATE_SAFE_OP + EC_STATE_ACK)
+                                                 : EC_STATE_OPERATIONAL;
+        ecx_writestate(&context_, static_cast<uint16_t>(slave_id));
+    };
+
+    nudge(left_slave_id_, left_addr_);
+    nudge(right_slave_id_, right_addr_);
+
+    return all_op;
+}
+
 bool EthercatConnection::update()
 {
     if (!connected_) {

@@ -70,6 +70,17 @@ public:
     // cycle's deadline is already gone.
     bool probeOperational(std::string& text);
 
+    // Nudge any hand that has left OP back towards it: acknowledge the error
+    // latch, then re-request OPERATIONAL. Returns true when every present hand
+    // is already in OP, i.e. there was nothing to do.
+    //
+    // Costs one register read plus at most one write per hand, so it is cyclic
+    // safe -- but it takes two calls to climb back (ACK, then request), and the
+    // slave only accepts OP while process data keeps arriving, which the cyclic
+    // loop is doing anyway. A hand that does not answer is left alone: there is
+    // no state machine to argue with until the wire is back.
+    bool requestOperational();
+
 private:
     // Read every slave's AL state off the bus and cache it into left/right
     // status. Bus traffic — only safe when the cyclic thread is not running.
