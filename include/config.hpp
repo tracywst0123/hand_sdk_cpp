@@ -13,8 +13,15 @@ namespace hand_sdk
 // every default here: notes.md, "DC-Synchron bring-up".
 struct DcConfig
 {
-    // Set false to leave the ESCs in SM-Synchron / FreeRun (no SYNC pulses).
-    bool enabled{true};
+    // False: no SYNC pulses at all, and the sync type below is what the device
+    // is asked to run -- SM-Synchron, acting on data arrival rather than on a
+    // clock. True: arm the cyclic unit and phase-lock the master to the DC grid.
+    //
+    // Off by default: this device rejects the 0x1C32/0x1C33 writes and does not
+    // answer the readback, so nothing ever confirms it honours SYNC0, and
+    // driving it in DC produced AL 0x001A "Synchronization error". Flip back to
+    // true to retest DC -- nothing below is deleted.
+    bool enabled{false};
 
     // SYNC0 period. Must equal the master cycle period; device floor 100 us.
     uint32_t sync0_cycle_ns{1'000'000};
@@ -29,14 +36,16 @@ struct DcConfig
     // clear of sync0_shift_ns by more than the phase jitter.
     int64_t master_offset_ns{400'000};
 
-    // Write 0x1C32:01 / 0x1C33:01 in PREOP so the device acts on SYNC0.
-    // Non-fatal: devices that hardwire the sync type reject it; we log the
-    // readback either way.
+    // Write 0x1C32:01 / 0x1C33:01 in PREOP, asking the device for the sync type
+    // below. Attempted in both modes -- the mode is the point of the write, not
+    // a DC detail. Non-fatal: devices that hardwire the sync type reject it, and
+    // we log the readback either way, which is what actually decides the mode.
     bool write_sync_type{true};
 
     // 0 = FreeRun, 1 = SM-Synchron, 2 = DC SYNC0, 3 = DC SYNC1.
-    uint16_t out_sync_type{2};
-    uint16_t in_sync_type{2};
+    // Follow `enabled`: 1 with it off, 2 with it on.
+    uint16_t out_sync_type{1};
+    uint16_t in_sync_type{1};
 };
 
 struct Config

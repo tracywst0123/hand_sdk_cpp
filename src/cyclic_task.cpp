@@ -51,37 +51,50 @@ void CyclicTask::stop()
 
     // Thread is joined, so the bus is ours alone: safe to spend milliseconds on
     // mailbox traffic now. Capture before disconnect() closes the port.
-    if (connection_.dcActive()) {
-        if (connection_.hasLeft()) {
-            left_diag_ = connection_.syncDiagnostics(connection_.leftSlaveId());
-        }
-        if (connection_.hasRight()) {
-            right_diag_ = connection_.syncDiagnostics(connection_.rightSlaveId());
-        }
-
-        // The device's own account of the run. 0x1C32:0B / 0x1C33:0B count the
-        // cycles where its application was still busy when the next SYNC0 came
-        // -- i.e. the slave missed its deadline, not us. Nonzero here separates
-        // "the hand choked on what we sent" from "we stopped feeding it", which
-        // is the whole question when a service call costs us OP.
-        const auto report = [](const char* label, const SyncDiagnostics& d) {
-            if (!d.valid) {
-                return;
-            }
-            std::clog << "[cyclic] " << label << " sync diagnostics:"
-                      << " sync type out/in " << d.out_sync_type << "/" << d.in_sync_type
-                      << " | cycle exceeded out/in " << d.out_cycle_exceeded << "/"
-                      << d.in_cycle_exceeded
-                      << " | shift too short out/in " << d.out_shift_too_short << "/"
-                      << d.in_shift_too_short;
-            if (d.out_cycle_exceeded != 0 || d.in_cycle_exceeded != 0) {
-                std::clog << "  <-- the device missed its own SYNC0 deadline";
-            }
-            std::clog << std::endl;
-        };
-        report("left", left_diag_);
-        report("right", right_diag_);
+    // Read in both modes, not just DC. These counters are the device's own
+    // account of whether it stayed synchronised, which is exactly the question
+    // in SM-Synchron too -- gating them on DC left the mode with no evidence at
+    // all. Safe here because the cyclic thread is already joined.
+    if (connection_.hasLeft()) {
+        left_diag_ = connection_.syncDiagnostics(connection_.leftSlaveId());
     }
+    if (connection_.hasRight()) {
+        right_diag_ = connection_.syncDiagnostics(connection_.rightSlaveId());
+    }
+
+    // Subindices per ETG.1020: :0B counts SM events that never arrived (the
+    // master was late or the frame was lost), :0C counts cycles where the
+    // device's own application had not finished in time, :0D shift time too
+    // short, :20 its own sync-error flag. Two different stories -- :0B points
+    // at us, :0C at the device -- which is why they are no longer lumped
+    // together under one name.
+    const auto report = [](const char* label, const SyncDiagnostics& d) {
+        if (!d.valid) {
+            std::clog << "[cyclic] " << label
+                      << " sync diagnostics: unavailable (device did not answer CoE)"
+                      << std::endl;
+            return;
+        }
+        std::clog << "[cyclic] " << label << " sync diagnostics:"
+                  << " sync type out/in 0x" << std::hex << d.out_sync_type << "/0x"
+                  << d.in_sync_type << std::dec
+                  << " | SM event missed " << d.out_sm_event_missed << "/"
+                  << d.in_sm_event_missed
+                  << " | cycle too small " << d.out_cycle_too_small << "/"
+                  << d.in_cycle_too_small
+                  << " | shift too short " << d.out_shift_too_short << "/"
+                  << d.in_shift_too_short
+                  << " | sync error " << static_cast<int>(d.out_sync_error) << "/"
+                  << static_cast<int>(d.in_sync_error);
+        if (d.out_cycle_too_small != 0 || d.in_cycle_too_small != 0) {
+            std::clog << "  <-- the device could not finish inside its cycle";
+        } else if (d.out_sm_event_missed != 0 || d.in_sm_event_missed != 0) {
+            std::clog << "  <-- frames did not reach the device on time";
+        }
+        std::clog << std::endl;
+    };
+    report("left", left_diag_);
+    report("right", right_diag_);
 
     connection_.disconnect();
 }

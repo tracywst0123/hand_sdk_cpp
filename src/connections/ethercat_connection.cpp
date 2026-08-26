@@ -73,9 +73,11 @@ std::string EthercatConnection::connect()
         std::clog << "  [" << i << "] '" << context_.slavelist[i].name << "'" << std::endl;
     }
 
-    // Tell the CoE application to act on SYNC0, while still in PREOP where
-    // 0x1C32/0x1C33 are writable (notes.md, "DC-Synchron bring-up").
-    if (config_.dc.enabled && config_.dc.write_sync_type) {
+    // Ask the CoE application for the configured sync type, while still in PREOP
+    // where 0x1C32/0x1C33 are writable. Not gated on dc.enabled: running
+    // SM-Synchron is a mode the device has to be told about too, and leaving it
+    // in whatever it happened to be in last is how you end up guessing.
+    if (config_.dc.write_sync_type) {
         for (int i = 1; i <= context_.slavecount; ++i) {
             if (!isHandSlave(i)) {
                 continue;
@@ -92,7 +94,11 @@ std::string EthercatConnection::connect()
     }
 
     ecx_config_map_group(&context_, iomap_, 0);
-    ecx_configdc(&context_);
+    // Only in DC mode: configdc arms no pulse of its own, but it does write DC
+    // registers, and a pure SM run should leave that state out of the picture.
+    if (config_.dc.enabled) {
+        ecx_configdc(&context_);
+    }
 
     // Identify left and right hand slaves by name
     left_slave_id_  = -1;
@@ -148,6 +154,13 @@ std::string EthercatConnection::connect()
                   << std::endl;
         // SOEM schedules the first pulse ~100 ms out (its SyncDelay), so the
         // pulses come alive during the OP loop below while the PLLs settle.
+    } else {
+        // Said out loud because every later symptom reads differently depending
+        // on it: no SYNC pulses, no reference-clock datagram, and the cyclic
+        // timer free-running instead of phase-locked.
+        std::clog << "[EtherCAT] SM-Synchron: no SYNC pulses, master cycle "
+                  << config_.dc.sync0_cycle_ns / 1000 << " us free-running"
+                  << std::endl;
     }
 
     logBusState("DC setup");
@@ -595,10 +608,27 @@ SyncDiagnostics EthercatConnection::syncDiagnostics(int slave_id)
     const bool ok = read16(0x1C32, 0x01, diag.out_sync_type) &&
                     read16(0x1C33, 0x01, diag.in_sync_type);
 
-    read16(0x1C32, 0x0B, diag.out_cycle_exceeded);
-    read16(0x1C33, 0x0B, diag.in_cycle_exceeded);
-    read16(0x1C32, 0x0C, diag.out_shift_too_short);
-    read16(0x1C33, 0x0C, diag.in_shift_too_short);
+    read16(0x1C32, 0x0B, diag.out_sm_event_missed);
+    read16(0x1C33, 0x0B, diag.in_sm_event_missed);
+    read16(0x1C32, 0x0C, diag.out_cycle_too_small);
+    read16(0x1C33, 0x0C, diag.in_cycle_too_small);
+    read16(0x1C32, 0x0D, diag.out_shift_too_short);
+    read16(0x1C33, 0x0D, diag.in_shift_too_short);
+
+    // :20 is a BOOLEAN, one byte, so it needs its own width rather than read16.
+    const auto read8 = [&](uint16_t index, uint8_t sub, uint8_t& out) {
+        uint8_t value = 0;
+        int size = static_cast<int>(sizeof(value));
+        const int wkc = ecx_SDOread(&context_, static_cast<uint16_t>(slave_id),
+                                    index, sub, FALSE, &size, &value, EC_TIMEOUTRXM);
+        if (wkc <= 0) {
+            return false;
+        }
+        out = value;
+        return true;
+    };
+    read8(0x1C32, 0x20, diag.out_sync_error);
+    read8(0x1C33, 0x20, diag.in_sync_error);
 
     diag.valid = ok;
     return diag;

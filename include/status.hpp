@@ -50,13 +50,25 @@ struct SlaveStatus
 struct SyncDiagnostics
 {
     bool valid{false};
-    // Both expect 0x0002 (DC SYNC0): this device does not implement SYNC1.
-    uint16_t out_sync_type{0};        // 0x1C32:01
-    uint16_t in_sync_type{0};         // 0x1C33:01
-    uint16_t out_cycle_exceeded{0};   // 0x1C32:0B — must not climb
-    uint16_t in_cycle_exceeded{0};    // 0x1C33:0B — must not climb
-    uint16_t out_shift_too_short{0};  // 0x1C32:0C
-    uint16_t in_shift_too_short{0};   // 0x1C33:0C
+
+    // 0x1C32:01 / 0x1C33:01. 0 = FreeRun, 1 = synchron with this object's own SM
+    // event, 2 = DC SYNC0, 3 = DC SYNC1. On a device that has outputs, inputs
+    // are commonly 0x22 -- synchron with the SM2 (output) event -- rather than
+    // 1, so do not read a mismatch here as a fault without the device manual.
+    uint16_t out_sync_type{0};
+    uint16_t in_sync_type{0};
+
+    // Subindices per ETG.1020. These were previously mislabelled one position
+    // out: :0B is the SM-event counter, not a cycle overrun, and shift-time is
+    // :0D rather than :0C. All optional, so a device may answer none of them.
+    uint16_t out_sm_event_missed{0};   // 0x1C32:0B — the SM event did not arrive
+    uint16_t in_sm_event_missed{0};    // 0x1C33:0B
+    uint16_t out_cycle_too_small{0};   // 0x1C32:0C — app did not finish in time
+    uint16_t in_cycle_too_small{0};    // 0x1C33:0C
+    uint16_t out_shift_too_short{0};   // 0x1C32:0D
+    uint16_t in_shift_too_short{0};    // 0x1C33:0D
+    uint8_t out_sync_error{0};         // 0x1C32:20 — the device's own verdict
+    uint8_t in_sync_error{0};          // 0x1C33:20
 };
 
 } // namespace hand_sdk
