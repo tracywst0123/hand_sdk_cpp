@@ -1,10 +1,76 @@
 #pragma once
 
+#include "messages.hpp"
+
+#include <array>
 #include <cstdint>
 #include <string>
 
 namespace hand_sdk
 {
+
+// Per-joint installation direction, in logical joint order (finger*4 + joint).
+//
+// +1 leaves a joint as the model sees it; -1 says the motor is fitted the other
+// way round, so the device's positive rotation is the model's negative. The
+// flip is applied to q, dq and tau alike and in both directions -- a command
+// goes out negated and the state comes back negated -- so everything above Api
+// works in one sign convention and nothing else has to know.
+//
+// Fixed here rather than exposed as a runtime setting: which way a motor is
+// fitted is a property of how the hand is built, not something to get wrong at
+// launch time. Edit the tables below and rebuild; the SDK, the node and the
+// bench app all pick the change up together.
+//
+// Left and right are separate tables because a mirrored pair does not share a
+// sign map: the same joint on the other hand may well be fitted the other way.
+//
+// Not flipped: gains (magnitudes), the fault bits, and anything on the service
+// channel. The zero-calibration sweep has its own direction field
+// (service::ZeroCalDir) and is left alone -- it is relative to the encoder, not
+// to the model.
+//
+// One row per finger, four joints each, then the reserved 21st slot, which has
+// no motor behind it and stays forward.
+constexpr std::array<int8_t, frames::kNumJoints> kLeftJointDirection = {
+    1, 1, -1, -1,  // finger0  j0 j1 j2 j3
+    1, 1, -1, -1,  // finger1
+    1, 1, -1, -1,  // finger2
+    1, 1, -1, -1,  // finger3
+    1, 1, -1, -1,  // finger4
+    1,           // reserved
+};
+
+constexpr std::array<int8_t, frames::kNumJoints> kRightJointDirection = {
+    1, 1, -1, -1,  // finger0  j0 j1 j2 j3
+    1, 1, -1, -1,  // finger1
+    1, 1, -1, -1,  // finger2
+    1, 1, -1, -1,  // finger3
+    1, 1, -1, -1,  // finger4
+    1,           // reserved
+};
+
+// A typo in the tables above is a build error, not something to find on a
+// bench: a 0 would zero a joint's command and read its position back as zero,
+// which looks exactly like a dead motor.
+constexpr bool onlySigns(const std::array<int8_t, frames::kNumJoints>& dirs)
+{
+    for (const auto dir : dirs) {
+        if (dir != 1 && dir != -1) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(onlySigns(kLeftJointDirection), "kLeftJointDirection: every entry must be +1 or -1");
+static_assert(onlySigns(kRightJointDirection), "kRightJointDirection: every entry must be +1 or -1");
+
+struct JointDirections
+{
+    std::array<int8_t, frames::kNumJoints> left{kLeftJointDirection};
+    std::array<int8_t, frames::kNumJoints> right{kRightJointDirection};
+};
 
 // EtherCAT synchronisation parameters.
 //
@@ -80,6 +146,9 @@ struct Config
     // the device substituting a value of its own, which is what this is here to
     // catch. Enum writes -- comm and mode -- are matched exactly and ignore it.
     float service_tolerance{1.0f / 2048.0f};  // ~0.000488
+
+    // Which joints are fitted backwards, from the tables above.
+    JointDirections joint_direction{};
 };
 
 } // namespace hand_sdk

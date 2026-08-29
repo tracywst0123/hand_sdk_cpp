@@ -12,6 +12,8 @@ namespace hand_sdk::frames::pdo
 // Both headers define a joint count; they must describe the same device.
 static_assert(hand_sdk::frames::kNumJoints == kNumJoints,
               "message and PDO joint counts disagree");
+static_assert(hand_sdk::frames::kNumActiveJoints == kNumMotorSlots,
+              "message and PDO motor counts disagree");
 
 // Fixed-point wire encodings ("s16enN" = signed int16 with N fraction bits;
 // fixed = float * 2^N):
@@ -58,10 +60,13 @@ inline void decodeJoints(const JointEntry* src,
                          std::array<float, kNumJoints>& dq,
                          std::array<float, kNumJoints>& tau)
 {
+    // Logical joint i is read from wire slot wireSlot(i) -- the device orders
+    // each finger's joints distal-first. See pdo_layout.hpp.
     for (std::size_t i = 0; i < kNumJoints; ++i) {
-        q[i]   = fromFixed(src[i].angle, kPosScale);
-        dq[i]  = fromFixed(src[i].speed, kVelScale);
-        tau[i] = fromFixed(src[i].torque, kTauScale);
+        const JointEntry& entry = src[wireSlot(i)];
+        q[i]   = fromFixed(entry.angle, kPosScale);
+        dq[i]  = fromFixed(entry.speed, kVelScale);
+        tau[i] = fromFixed(entry.torque, kTauScale);
     }
 }
 
@@ -70,10 +75,13 @@ inline void encodeJoints(const std::array<float, kNumJoints>& q,
                          const std::array<float, kNumJoints>& tau,
                          JointEntry* dst)
 {
+    // Same permutation the other way round: logical joint i is written into
+    // wire slot wireSlot(i).
     for (std::size_t i = 0; i < kNumJoints; ++i) {
-        dst[i].angle  = toFixed(q[i], kPosScale);
-        dst[i].speed  = toFixed(dq[i], kVelScale);
-        dst[i].torque = toFixed(tau[i], kTauScale);
+        JointEntry& entry = dst[wireSlot(i)];
+        entry.angle  = toFixed(q[i], kPosScale);
+        entry.speed  = toFixed(dq[i], kVelScale);
+        entry.torque = toFixed(tau[i], kTauScale);
     }
 }
 
@@ -95,9 +103,17 @@ inline HandState decodeReadPDO(const ReadPDO& pdo)
 
     decodeJoints(pdo.joints, state.q, state.dq, state.tau);
 
-    // Error_L in the low half, Error_H in the high half; bits 0..20 = motors.
-    state.error_bits = static_cast<uint32_t>(pdo.error.error1) |
-                       (static_cast<uint32_t>(pdo.error.error2) << 16);
+    // Error_L in the low half, Error_H in the high half; bits 0..20 = motors --
+    // in *device* slot order, so the bits are permuted into logical joint order
+    // like everything else. Bit 20 is the reserved slot and stays where it is.
+    const uint32_t raw = static_cast<uint32_t>(pdo.error.error1) |
+                         (static_cast<uint32_t>(pdo.error.error2) << 16);
+    state.error_bits = raw & ~((1u << kNumMotorSlots) - 1u);
+    for (std::size_t i = 0; i < kNumMotorSlots; ++i) {
+        if ((raw & (1u << wireSlot(i))) != 0u) {
+            state.error_bits |= 1u << i;
+        }
+    }
 
     // The service region is not decoded here: it belongs to the service
     // request/response path (service_codec.hpp + CyclicTask's service window).

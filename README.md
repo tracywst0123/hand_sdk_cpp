@@ -56,12 +56,12 @@ Grant both to **your final executable** (not to the SDK, and not to the system
 Python):
 
 ```bash
-sudo setcap cap_net_raw,cap_sys_nice+ep ./your_program
+sudo setcap cap_net_admin,cap_net_raw,cap_sys_nice+ep ./your_program
 ```
 
-Without `cap_net_raw`, `connect()` fails to open the interface. Without
-`cap_sys_nice`, everything still runs but the cycle jitters more and logs a
-warning. Running as root also works but is not recommended.
+Without `cap_net_admin` or `cap_net_raw`, `connect()` fails to open the
+interface. Without `cap_sys_nice`, everything still runs but the cycle jitters
+more and logs a warning. Running as root also works but is not recommended.
 
 ---
 
@@ -89,7 +89,7 @@ Run the example (edit `interface_name` in `examples/main.cpp` first, or copy it
 as a starting point for your own program):
 
 ```bash
-sudo setcap cap_net_raw,cap_sys_nice+ep build/hand_sdk_example
+sudo setcap cap_net_admin,cap_net_raw,cap_sys_nice+ep build/hand_sdk_example
 ./build/hand_sdk_example
 ```
 
@@ -176,7 +176,7 @@ so it can be unpacked anywhere. The result lands in your home directory:
 tar xzf hand_sdk-1.0.1.tar.gz -C ~/libs      # unpack anywhere
 cmake -B build -DCMAKE_PREFIX_PATH=~/libs/hand_sdk
 cmake --build build
-sudo setcap cap_net_raw,cap_sys_nice+ep build/their_app
+sudo setcap cap_net_admin,cap_net_raw,cap_sys_nice+ep build/their_app
 ```
 
 Their CMakeLists needs only the two lines from
@@ -187,7 +187,7 @@ Tell them two things that are not obvious from the tarball:
 - It is a **compiled archive for Linux x86-64**, not source. A different
   architecture needs a rebuild from source.
 - Their **final executable** still needs
-  `sudo setcap cap_net_raw,cap_sys_nice+ep` to reach the hardware. The
+  `sudo setcap cap_net_admin,cap_net_raw,cap_sys_nice+ep` to reach the hardware. The
   capability attaches to their binary, not to the library.
 
 ### Updating a shared install
@@ -264,7 +264,7 @@ Build and grant capabilities:
 ```bash
 cmake -B build -DCMAKE_PREFIX_PATH=/opt/hand_sdk
 cmake --build build
-sudo setcap cap_net_raw,cap_sys_nice+ep build/my_app
+sudo setcap cap_net_admin,cap_net_raw,cap_sys_nice+ep build/my_app
 ./build/my_app
 ```
 
@@ -330,13 +330,29 @@ source install/setup.bash
 #                --cmake-args -DSOEM_ROOT=/path/to/SOEM
 
 # capabilities go on the installed binary
-sudo setcap cap_net_raw,cap_sys_nice+ep install/my_hand_node/lib/my_hand_node/my_hand_node
+sudo setcap cap_net_admin,cap_net_raw,cap_sys_nice+ep install/my_hand_node/lib/my_hand_node/my_hand_node
 ros2 run my_hand_node my_hand_node
 ```
 
 Colcon builds `hand_sdk_cpp` first and adds its install prefix to the
 `CMAKE_PREFIX_PATH` for your node automatically, so `find_package(hand_sdk)`
 just works — no manual paths.
+
+`setcap` makes the binary a secure-execution file, and the loader ignores
+`LD_LIBRARY_PATH` for those — which is exactly how a sourced ROS workspace
+advertises `/opt/ros/<distro>/lib`. A capability-carrying ROS node therefore
+needs an absolute `RPATH` or it fails at exec with `librclcpp.so: cannot open
+shared object file`. Give your node one:
+
+```cmake
+get_filename_component(_ros_lib_dir "${rclcpp_DIR}/../../../lib" ABSOLUTE)
+set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_PREFIX}/lib;${_ros_lib_dir}")
+target_link_options(my_hand_node PRIVATE -Wl,--disable-new-dtags)
+```
+
+The `--disable-new-dtags` matters: it emits `DT_RPATH` instead of `DT_RUNPATH`,
+and only `DT_RPATH` is inherited by the RMW implementation that `rcl` opens with
+`dlopen` at startup.
 
 ### Node structure hint
 
@@ -374,6 +390,27 @@ Units are SI: positions in rad, velocities in rad/s, torques in N·m. Only one
 service call may be in flight at a time; a second concurrent call fails
 immediately with `"another service call is in progress"` rather than queueing.
 
+### Joint order and direction
+
+Every index the API takes or returns -- `q[i]`, `JointMask` bit `i`, `error_bits`
+bit `i` -- is a **logical** joint, `finger * 4 + joint`, with the reserved 21st
+slot last. Two things sit between that and the device, both applied at the
+boundary and nowhere else:
+
+- **Order.** The device reads each finger's four joints distal-first, so logical
+  0,1,2,3 go out as slots 3,2,1,0, and likewise for every other finger. This
+  lives in `wireSlot()` (`frames/pdo_layout.hpp`) and is applied by the codecs
+  in both directions. The only place device slot numbers surface is the
+  `[service]` request/reply dump, which prints the raw wire.
+- **Direction.** `kLeftJointDirection` / `kRightJointDirection` in `config.hpp`
+  carry one `+1` / `-1` per joint per hand, and `Config::joint_direction`
+  defaults to them. `-1` means that motor is fitted the other way round from the
+  model, and Api negates `q`, `dq` and `tau` on the way out and back again on
+  the way in. Gains, fault bits and the service channel are never flipped. The
+  tables are fixed at build time -- how a motor is fitted is a property of the
+  hand, not a launch option -- and a `static_assert` rejects any entry that is
+  not `+1` or `-1`.
+
 ### Write services are verified per joint
 
 A read service succeeds once a reply block for that hand comes back carrying the
@@ -408,7 +445,11 @@ it runs `0` instead. One step of disagreement is that conversion; more than one
 step is the device substituting a value of its own.
 
 Joints outside a request's `JointMask` are sent the device's "no action" word,
-are never asked for anything, and so can neither pass nor fail. The reserved
+are never asked for anything, and so can neither pass nor fail. Cmd 10 is the
+exception: its unselected slots carry `0x0000` (`ZeroCalCmd::kNone`), because the
+ignore word's low byte is `0xFF` and only `0x00` is defined as "no calibration
+starts" — sending the ignore word there started a calibration on the joints the
+mask meant to skip. The reserved
 21st slot is written like the others but never verified — nothing is behind it to
 answer (`JointMask::active()` is the 20 that are).
 

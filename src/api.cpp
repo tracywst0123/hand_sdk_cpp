@@ -27,6 +27,29 @@ using service::report::jointList;
 using service::report::hexWord;
 using service::report::number;
 
+// --- installation direction --------------------------------------------------
+// Config::joint_direction, applied at the Api boundary and nowhere else: the
+// frames below stay in device sign, everything above stays in model sign. The
+// flip is its own inverse, so commands going out and state coming back run
+// through the same function.
+void flipDirections(const std::array<int8_t, frames::kNumJoints>& dirs,
+                    std::array<float, frames::kNumJoints>& values)
+{
+    for (std::size_t i = 0; i < frames::kNumJoints; ++i) {
+        if (dirs[i] < 0) {
+            values[i] = -values[i];
+        }
+    }
+}
+
+template <typename JointSet>
+void flipDirections(const std::array<int8_t, frames::kNumJoints>& dirs, JointSet& joints)
+{
+    flipDirections(dirs, joints.q);
+    flipDirections(dirs, joints.dq);
+    flipDirections(dirs, joints.tau);
+}
+
 // Which of the joints a request addressed can be held to an answer: the ones
 // with a motor behind them. The reserved 21st slot goes out with the rest --
 // the frame has to carry something there -- but nothing echoes for it, so it is
@@ -124,7 +147,9 @@ Result<void> checkHand(CyclicTask& task, service::Hand hand)
 }
 
 // Raw service block as it goes on / comes off the wire: cmd word then the 63
-// payload words, 12 per line (4 joints).
+// payload words, 12 per line (4 joints). The j-labels are *device slots*, not
+// logical joints -- this is the wire, before frames/ un-flips each finger, so a
+// request addressing logical j0 shows up under j00's fourth word (slot 3).
 void dumpService(const char* tag, const frames::pdo::ServiceData& sd)
 {
     std::ostringstream oss;
@@ -249,7 +274,14 @@ Result<frames::DualHandState> Api::readState()
         if (task_->states().tryRead(raw, kUserReadAttempts) == 0) {
             return {false, "no state published yet"};
         }
-        return {true, "OK", frames::pdo::decodeReadPDO(raw)};
+        auto state = frames::pdo::decodeReadPDO(raw);
+        if (state.has_left) {
+            flipDirections(config_.joint_direction.left, state.left);
+        }
+        if (state.has_right) {
+            flipDirections(config_.joint_direction.right, state.right);
+        }
+        return {true, "OK", state};
     } catch (const std::exception& e) {
         return {false, e.what()};
     }
@@ -262,8 +294,17 @@ Result<void> Api::sendCommand(const frames::DualHandCommand& command)
             return {false, "not connected"};
         }
         // Encode on the caller's thread — clamping and NaN guards included —
-        // so the cyclic thread only ever copies ready-to-send frames.
-        task_->commands().write(frames::pdo::encodeWritePDO(command));
+        // so the cyclic thread only ever copies ready-to-send frames. The sign
+        // map is applied to a copy: the caller's command is theirs, and it is
+        // in model sign.
+        frames::DualHandCommand outgoing = command;
+        if (outgoing.has_left) {
+            flipDirections(config_.joint_direction.left, outgoing.left);
+        }
+        if (outgoing.has_right) {
+            flipDirections(config_.joint_direction.right, outgoing.right);
+        }
+        task_->commands().write(frames::pdo::encodeWritePDO(outgoing));
         return {true, "OK"};
     } catch (const std::exception& e) {
         return {false, e.what()};

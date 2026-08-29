@@ -29,14 +29,19 @@ inline void fillSlots(ServiceData& sd, int16_t d0, int16_t d1, int16_t d2)
 // Selected joints get the values, the rest get the ignore word -- which is the
 // device's own "this slot carries no action", so unselected motors keep
 // whatever they were set to.
+//
+// JointMask bits are logical joints, so bit j lands in wire slot wireSlot(j):
+// the service payload is the same twenty-one joints in the same device order as
+// the joint PDO region, distal-first within each finger.
 inline void fillSelected(ServiceData& sd, const service::JointMask& joints,
                          int16_t d0, int16_t d1, int16_t d2)
 {
     for (std::size_t j = 0; j < kNumJoints; ++j) {
-        const bool on = joints.test(j);
-        sd.data[j * 3 + 0] = on ? d0 : kIgnore;
-        sd.data[j * 3 + 1] = on ? d1 : kIgnore;
-        sd.data[j * 3 + 2] = on ? d2 : kIgnore;
+        const bool on   = joints.test(j);
+        const auto slot = wireSlot(j);
+        sd.data[slot * 3 + 0] = on ? d0 : kIgnore;
+        sd.data[slot * 3 + 1] = on ? d1 : kIgnore;
+        sd.data[slot * 3 + 2] = on ? d2 : kIgnore;
     }
 }
 
@@ -58,9 +63,11 @@ inline bool cmdIsWrite(int16_t cmd)
     return (static_cast<uint16_t>(cmd) & 0x8000u) != 0;
 }
 
+// One payload word of a *logical* joint: every decoder below reads through this,
+// so the device-order permutation is applied exactly once, here.
 inline uint16_t word(const ServiceData& sd, std::size_t joint, std::size_t pos)
 {
-    return static_cast<uint16_t>(sd.data[joint * 3 + pos]);
+    return static_cast<uint16_t>(sd.data[wireSlot(joint) * 3 + pos]);
 }
 
 // --- cmd_id 4: communication control -----------------------------------------
@@ -224,8 +231,8 @@ inline bool decodeGains(const ServiceData& sd, service::JointGainsArray& out)
         return false;
     }
     for (std::size_t j = 0; j < kNumJoints; ++j) {
-        out[j].kp = fromFixed(sd.data[j * 3 + 0], kGainScale);
-        out[j].kd = fromFixed(sd.data[j * 3 + 1], kGainScale);
+        out[j].kp = fromFixed(static_cast<int16_t>(word(sd, j, 0)), kGainScale);
+        out[j].kd = fromFixed(static_cast<int16_t>(word(sd, j, 1)), kGainScale);
     }
     return true;
 }

@@ -18,6 +18,40 @@ namespace hand_sdk::frames::pdo
 
 constexpr std::size_t kNumJoints = 21;
 
+// --- logical joint <-> wire slot ---------------------------------------------
+// The device numbers each finger's four joints the other way round from every
+// layer above this one. `finger0_joint0` -- the joint nearest the palm, index 0
+// everywhere in the API, in ROS and in the UI -- is the *fourth* slot the device
+// reads, and the distal joint is the first. So the twenty motors go out as
+// 3,2,1,0, 7,6,5,4, 11,10,9,8, ... and come back the same way.
+//
+// This is the only place that knows: the codecs below permute on the way to the
+// wire and again on the way back, so nothing above frames/ ever sees a device
+// slot number. The permutation is its own inverse, which is why encode and
+// decode call the same function.
+//
+// The reserved 21st slot has no finger and maps to itself.
+constexpr std::size_t kJointsPerFinger = 4;
+constexpr std::size_t kNumMotorSlots   = kNumJoints - 1;  // 20 = 5 fingers x 4
+
+constexpr std::size_t wireSlot(std::size_t joint)
+{
+    return joint < kNumMotorSlots
+               ? (joint / kJointsPerFinger) * kJointsPerFinger +
+                     (kJointsPerFinger - 1 - joint % kJointsPerFinger)
+               : joint;
+}
+
+// The order the device expects, spelled out, so a change here has to be
+// deliberate: 3,2,1,0, 7,6,5,4, ... 19,18,17,16 with the reserved slot last.
+static_assert(wireSlot(0) == 3 && wireSlot(1) == 2 && wireSlot(2) == 1 &&
+                  wireSlot(3) == 0,
+              "finger 0 must go out distal-first");
+static_assert(wireSlot(4) == 7 && wireSlot(16) == 19 && wireSlot(19) == 16,
+              "every finger flips the same way");
+static_assert(wireSlot(20) == 20, "the reserved slot has no finger to flip in");
+static_assert(wireSlot(wireSlot(5)) == 5, "the permutation must be its own inverse");
+
 constexpr std::size_t kNumPdoWords    = 130;
 
 // Service payload word meaning "no action / no value here".
