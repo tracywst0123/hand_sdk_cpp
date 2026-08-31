@@ -33,7 +33,7 @@ namespace hand_sdk
 // One row per finger, four joints each, then the reserved 21st slot, which has
 // no motor behind it and stays forward.
 constexpr std::array<int8_t, frames::kNumJoints> kLeftJointDirection = {
-    1, 1, -1, -1,  // finger0  j0 j1 j2 j3
+    -1, 1, -1, -1,  // finger0  j0 j1 j2 j3
     1, 1, -1, -1,  // finger1
     1, 1, -1, -1,  // finger2
     1, 1, -1, -1,  // finger3
