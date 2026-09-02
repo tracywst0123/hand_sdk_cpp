@@ -42,7 +42,7 @@ constexpr std::array<int8_t, frames::kNumJoints> kLeftJointDirection = {
 };
 
 constexpr std::array<int8_t, frames::kNumJoints> kRightJointDirection = {
-    1, 1, -1, -1,  // finger0  j0 j1 j2 j3
+    -1, 1, -1, -1,  // finger0  j0 j1 j2 j3
     1, 1, -1, -1,  // finger1
     1, 1, -1, -1,  // finger2
     1, 1, -1, -1,  // finger3
@@ -110,8 +110,10 @@ struct SyncConfig
     uint16_t in_sync_type{1};
 };
 
+//enp132s0
+
 struct Config
-{
+{ 
     std::string interface_name{"enp132s0"};
     std::string left_hand_name{"hand_200_L"};
     std::string right_hand_name{"hand_200_R"};
