@@ -12,7 +12,7 @@
 // Build: produced as `bit_io_test` by CMakeLists.txt.
 // Run (needs raw socket access):
 //     sudo ./bit_io_test <interface>
-//     e.g. sudo ./bit_io_test enp132s0
+//     e.g. sudo ./bit_io_test enp133s0f1
 //
 // Assumes exactly one slave on the bus.
 
@@ -37,7 +37,7 @@ void onSignal(int) { g_run = false; }
 
 int main(int argc, char** argv)
 {
-    const std::string iface = (argc > 1) ? argv[1] : "enp132s0";
+    const std::string iface = (argc > 1) ? argv[1] : "enp133s0f1";
 
     std::signal(SIGINT, onSignal);
     std::signal(SIGTERM, onSignal);

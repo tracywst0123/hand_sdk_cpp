@@ -11,6 +11,9 @@ thread-safe API that your code can call at any rate from any thread.
   types. You never link SOEM yourself.
 - **Design notes**: see [notes.md](notes.md) for the wire protocol, DC bring-up,
   and internal layering.
+- **NIC setup**: see [network.md](network.md) (Chinese) for choosing and
+  configuring the EtherCAT port — NetworkManager, EEE, offloads, and the
+  read-only bus probes in [tools/](tools/).
 
 Ways to use it, covered below:
 
@@ -460,7 +463,10 @@ answer (`JointMask::active()` is the 20 that are).
 | Symptom | Cause / fix |
 |---|---|
 | `SOEM not found` at configure time | Build SOEM, then `-DSOEM_ROOT=/path/to/SOEM` |
-| `ecx_init failed: could not open interface` | Wrong `interface_name`, or missing `cap_net_raw` |
+| `ecx_init failed: could not open interface` | Wrong `interface_name`, missing `cap_net_raw`, or the NIC is down — see [network.md](network.md) |
+| Scans succeed sometimes and fail others | NIC still NetworkManager-managed, or the port is down — see [network.md](network.md) §2.3, §2.4 |
+| Frame loss that worsens with cable length | Check `carrier_changes` first — the link may be renegotiating with CRC counters at zero; see [network.md](network.md) §3 |
+| Link goes up and down every few seconds | PHY cannot hold negotiation — `tools/eclinktest.sh` quantifies it |
 | `no matching hand slaves found` | Device names differ — the error lists what was found on the bus; set `left_hand_name` / `right_hand_name` to match |
 | `SCHED_FIFO failed` in the log | Missing `cap_sys_nice`; runs anyway with more jitter |
 | `failed to reach OPERATIONAL` | Check the AL status codes in the error text; see [notes.md](notes.md) "DC-Synchron bring-up" |

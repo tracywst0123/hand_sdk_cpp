@@ -110,11 +110,9 @@ struct SyncConfig
     uint16_t in_sync_type{1};
 };
 
-//enp132s0
-
 struct Config
 { 
-    std::string interface_name{"enp132s0"};
+    std::string interface_name{"enp133s0f1"};
     std::string left_hand_name{"hand_200_L"};
     std::string right_hand_name{"hand_200_R"};
     SyncConfig dc{};

@@ -170,7 +170,7 @@ int main()
     std::signal(SIGTERM, onSignal);
 
     hand_sdk::Config config;
-    config.interface_name  = "enp132s0";
+    config.interface_name  = "enp133s0f1";
     config.left_hand_name  = "hand_200_L";
     config.right_hand_name = "hand_200_R";
 
